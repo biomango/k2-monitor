@@ -207,15 +207,41 @@ static uint16_t textOn(uint32_t rgb) {
   return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? RGB565(0, 0, 0) : C_WHITE;
 }
 
-static void drawTemp(bool left, const char *label, uint16_t labelCol, int value, int y) {
-  String v = value < 0 ? String("--") : String(value);
-  int wl = tft.textWidth(String(label) + " ", 2);
-  int wv = tft.textWidth(v, 2);
-  int xv = left ? 28 + wl : 206 - wv;
-  int xl = left ? 28 : xv - wl;
-  text(String(label), xl, y, 2, labelCol, C_BG);
-  text(v, xv, y, 2, C_WHITE, C_BG);
-  if (value >= 0) tft.drawCircle(xv + wv + 3, y + 3, 2, C_WHITE);
+// 透明背景文字（只畫字，不填底色）：前景疊在背景大數字上用
+static void textT(const String &s, int x, int y, int font, uint16_t fg, uint8_t datum = TL_DATUM) {
+  tft.setTextDatum(datum);
+  tft.setTextColor(fg);
+  tft.drawString(s, x, y, font);
+}
+
+static uint16_t mix565(uint16_t a, uint16_t b, uint8_t t) {  // t=0 → a，t=255 → b
+  int ar = ((a >> 11) & 0x1F) << 3, ag = ((a >> 5) & 0x3F) << 2, ab = (a & 0x1F) << 3;
+  int br = ((b >> 11) & 0x1F) << 3, bg = ((b >> 5) & 0x3F) << 2, bb = (b & 0x1F) << 3;
+  return RGB565(ar + (br - ar) * t / 255, ag + (bg - ag) * t / 255, ab + (bb - ab) * t / 255);
+}
+
+// ---- 背景大數字：TFT 內建字型 6 放大，實心、低對比（沒有外暈）----
+static int bgPct = 0;
+static uint16_t bgColor = 0;
+
+static void drawBgNumber() {
+  String n = String(bgPct);
+  // 字型 6 一個數字 27x48；放大後上下各留約 28 像素餘裕，不會碰到外圈或被裁切：
+  // 1~2 位 ×3 = 81x144（2 位共 162x144）、3 位(100) ×2 = 162x96
+  uint8_t sz = n.length() <= 2 ? 3 : 2;
+  tft.setTextSize(sz);
+  tft.setTextColor(mix565(C_BG, bgColor, 36));  // 單一參數 = 透明背景，只畫字
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(n, 120, 122, 6);
+  tft.setTextSize(1);
+}
+
+// 把某個區塊還原成「底色 + 背景大數字」（用 viewport 裁切，只畫這個矩形）
+static void bgRestore(int x, int y, int w, int h) {
+  tft.setViewport(x, y, w, h, false);
+  tft.fillRect(x, y, w, h, C_BG);
+  drawBgNumber();
+  tft.resetViewport();
 }
 
 // ====================== 各畫面 ======================
@@ -279,6 +305,9 @@ static bool slotsEqual(const Data &a, const Data &b) {
 
 static void renderDash() {
   bool force = !shownValid;
+  int pct = (int)(constrain(cur.progress, 0.0f, 1.0f) * 100 + 0.5f);
+  int shownPct = (int)(constrain(shown.progress, 0.0f, 1.0f) * 100 + 0.5f);
+  bool bgDirty = force || pct != shownPct || cur.stateColor != shown.stateColor;
 
   // 外圈進度條
   float len = constrain(cur.progress, 0.0f, 1.0f) * RING_TOTAL;
@@ -291,63 +320,61 @@ static void renderDash() {
     shownLen = len;
   }
 
+  // 背景大數字：百分比或狀態色改變時，整個中央重畫，前景再全部補畫
+  if (bgDirty) {
+    bgPct = pct;
+    bgColor = cur.stateColor;
+    bgRestore(28, 22, 184, 200);
+  }
+
   // 狀態列：圓點 + 狀態 + 層數
-  if (force || cur.state != shown.state || cur.stateColor != shown.stateColor ||
-      cur.layerCur != shown.layerCur || cur.layerTotal != shown.layerTotal) {
-    tft.fillRect(28, 22, 184, 18, C_BG);
+  if (bgDirty || cur.state != shown.state || cur.layerCur != shown.layerCur || cur.layerTotal != shown.layerTotal) {
+    if (!bgDirty) bgRestore(28, 22, 184, 18);
     tft.fillCircle(34, 31, 5, cur.stateColor);
-    text(cur.state, 44, 23, 2, C_WHITE, C_BG);
+    textT(cur.state, 44, 23, 2, C_WHITE);
     if (cur.layerCur >= 0) {
       String ly = "L" + String(cur.layerCur) + (cur.layerTotal > 0 ? "/" + String(cur.layerTotal) : "");
-      text(ly, 212, 23, 2, C_GREY, C_BG, TR_DATUM);
+      textT(ly, 212, 23, 2, C_GREY, TR_DATUM);
     }
   }
 
   // 檔名（太長就截斷加 ..）
-  if (force || cur.filename != shown.filename) {
-    tft.fillRect(28, 40, 184, 16, C_BG);
+  if (bgDirty || cur.filename != shown.filename) {
+    if (!bgDirty) bgRestore(28, 40, 184, 16);
     String fn = cur.filename;
     bool cut = false;
     while (fn.length() > 1 && tft.textWidth(fn + (cut ? ".." : ""), 2) > 184) {
       fn.remove(fn.length() - 1);
       cut = true;
     }
-    text(fn + (cut ? ".." : ""), 28, 40, 2, C_GREY, C_BG);
+    textT(fn + (cut ? ".." : ""), 28, 40, 2, C_GREY);
   }
 
-  // 百分比（75px 大字，垂直置中；數字本身水平置中，% 貼在右邊）
-  int pct = (int)(constrain(cur.progress, 0.0f, 1.0f) * 100 + 0.5f);
-  int shownPct = (int)(constrain(shown.progress, 0.0f, 1.0f) * 100 + 0.5f);
-  if (force || pct != shownPct) {
-    tft.fillRect(28, 83, 184, 76, C_BG);
-    String n = String(pct);
-    int wn = tft.textWidth(n, 8);
-    int wp = tft.textWidth("%", 4);
-    int x0 = 120 - wn / 2;
-    if (x0 + wn + 2 + wp > 214) x0 = 214 - (wn + 2 + wp);  // 100% 時整組往左靠
-    text(n, x0, 83, 8, C_WHITE, C_BG);
-    text("%", x0 + wn + 2, 127, 4, C_GREY, C_BG);
+  // ETA / ELAPSED：上面小標籤，下面數值
+  if (bgDirty || cur.etaS != shown.etaS || cur.elapsedS != shown.elapsedS) {
+    if (!bgDirty) bgRestore(28, 66, 184, 46);
+    textT("ETA", 28, 66, 2, C_GREY);
+    textT("ELAPSED", 212, 66, 2, C_GREY, TR_DATUM);
+    textT(fmtT(cur.etaS), 28, 84, 4, C_WHITE);
+    textT(fmtT(cur.elapsedS), 212, 84, 4, C_WHITE, TR_DATUM);
   }
 
-  // ETA / ELAPSED（小字：標籤 8px、數值 16px，放在百分比上方）
-  if (force || cur.etaS != shown.etaS || cur.elapsedS != shown.elapsedS) {
-    tft.fillRect(28, 58, 184, 25, C_BG);
-    text("ETA", 28, 58, 1, C_GREY, C_BG);
-    text("ELAPSED", 212, 58, 1, C_GREY, C_BG, TR_DATUM);
-    text(fmtT(cur.etaS), 28, 67, 2, C_WHITE, C_BG);
-    text(fmtT(cur.elapsedS), 212, 67, 2, C_WHITE, C_BG, TR_DATUM);
-  }
-
-  // 溫度
-  if (force || cur.nozzle != shown.nozzle || cur.bed != shown.bed) {
-    tft.fillRect(28, 160, 184, 16, C_BG);
-    drawTemp(true, "NOZ", C_ORANGE, cur.nozzle, 160);
-    drawTemp(false, "BED", C_BLUE, cur.bed, 160);
+  // NOZ / BED：上面小標籤，下面數值 + 度數圈
+  if (bgDirty || cur.nozzle != shown.nozzle || cur.bed != shown.bed) {
+    if (!bgDirty) bgRestore(28, 116, 184, 46);
+    textT("NOZ", 28, 116, 2, C_ORANGE);
+    textT("BED", 212, 116, 2, C_BLUE, TR_DATUM);
+    String nv = cur.nozzle < 0 ? String("--") : String(cur.nozzle);
+    String bv = cur.bed < 0 ? String("--") : String(cur.bed);
+    textT(nv, 28, 134, 4, C_WHITE);
+    textT(bv, 204, 134, 4, C_WHITE, TR_DATUM);
+    if (cur.nozzle >= 0) tft.drawCircle(28 + tft.textWidth(nv, 4) + 5, 139, 3, C_WHITE);
+    if (cur.bed >= 0) tft.drawCircle(209, 139, 3, C_WHITE);
   }
 
   // 四個卡槽 + 材質，使用中的用白色粗框
-  if (force || !slotsEqual(cur, shown)) {
-    tft.fillRect(28, 177, 184, 44, C_BG);
+  if (bgDirty || !slotsEqual(cur, shown)) {
+    if (!bgDirty) bgRestore(28, 177, 184, 44);
     for (int i = 0; i < 4; i++) {
       int x = 28 + (i * 146) / 3;
       const int y = 178;
@@ -362,13 +389,13 @@ static void renderDash() {
         } else {
           tft.drawRoundRect(x, y, 38, 22, 5, C_BORDER);
         }
-        text(name, x + 19, y + 3, 2, textOn(cur.slots[i].rgb), col, TC_DATUM);
-        text(String(cur.slots[i].mat), x + 19, y + 25, 2, act ? C_WHITE : C_GREY, C_BG, TC_DATUM);
+        textT(name, x + 19, y + 3, 2, textOn(cur.slots[i].rgb), TC_DATUM);
+        textT(String(cur.slots[i].mat), x + 19, y + 25, 2, act ? C_WHITE : C_GREY, TC_DATUM);
       } else {
         tft.fillRoundRect(x, y, 38, 22, 5, C_EMPTY);
         tft.drawRoundRect(x, y, 38, 22, 5, C_BORDER);
         tft.drawLine(x + 13, y + 18, x + 25, y + 4, C_GREY);
-        text("--", x + 19, y + 25, 2, C_GREY, C_BG, TC_DATUM);
+        textT("--", x + 19, y + 25, 2, C_GREY, TC_DATUM);
       }
     }
   }
