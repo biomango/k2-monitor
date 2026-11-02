@@ -547,8 +547,10 @@ static String row(const String &k, const String &v) {
 void handleRoot() {
   web.setContentLength(CONTENT_LENGTH_UNKNOWN);
   web.send(200, "text/html; charset=utf-8", "");
-  web.sendContent_P(PAGE_HEAD);
-  web.sendContent(htmlEscape(printerHost));
+  web.sendContent_P(PAGE_HEAD); // 注意：chunked 模式下 sendContent("") 會直接結束回應，所以空字串不能送
+String hostVal = htmlEscape(printerHost);
+if (hostVal.length() > 0) web.sendContent(hostVal);
+  
   web.sendContent_P(PAGE_MID);
   String ago = lastOkMs ? String((millis() - lastOkMs) / 1000) + " 秒前" : String("尚未成功");
   web.sendContent(row("WiFi", WiFi.SSID()));
