@@ -27,6 +27,10 @@
 #define HTTP_TIMEOUT_MS    4000
 #define BL_PIN             5                // 背光腳位
 #define BL_ON_LEVEL        LOW              // 螢幕全黑的話改成 HIGH
+#define FLOW_EFFECT        1                // 外圈流水特效，0 = 關閉
+#define FLOW_MS            40               // 流水每幀間隔（毫秒），越小越流暢但越吃 CPU
+#define FLOW_STEP          5.0f             // 每幀前進的像素
+#define FLOW_LEN           60.0f            // 亮帶長度（像素）
 // ====================================================
 
 #define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
@@ -311,38 +315,39 @@ static void renderDash() {
     text(fn + (cut ? ".." : ""), 28, 40, 2, C_GREY, C_BG);
   }
 
-  // 百分比
+  // 百分比（75px 大字，垂直置中；數字本身水平置中，% 貼在右邊）
   int pct = (int)(constrain(cur.progress, 0.0f, 1.0f) * 100 + 0.5f);
   int shownPct = (int)(constrain(shown.progress, 0.0f, 1.0f) * 100 + 0.5f);
   if (force || pct != shownPct) {
-    tft.fillRect(28, 58, 184, 50, C_BG);
+    tft.fillRect(28, 83, 184, 76, C_BG);
     String n = String(pct);
-    int wn = tft.textWidth(n, 6);
+    int wn = tft.textWidth(n, 8);
     int wp = tft.textWidth("%", 4);
-    int x0 = 120 - (wn + wp + 2) / 2;
-    text(n, x0, 58, 6, C_WHITE, C_BG);
-    text("%", x0 + wn + 2, 80, 4, C_GREY, C_BG);
+    int x0 = 120 - wn / 2;
+    if (x0 + wn + 2 + wp > 214) x0 = 214 - (wn + 2 + wp);  // 100% 時整組往左靠
+    text(n, x0, 83, 8, C_WHITE, C_BG);
+    text("%", x0 + wn + 2, 127, 4, C_GREY, C_BG);
   }
 
-  // ETA / ELAPSED
+  // ETA / ELAPSED（小字：標籤 8px、數值 16px，放在百分比上方）
   if (force || cur.etaS != shown.etaS || cur.elapsedS != shown.elapsedS) {
-    tft.fillRect(28, 110, 184, 44, C_BG);
-    text("ETA", 28, 110, 2, C_GREY, C_BG);
-    text("ELAPSED", 212, 110, 2, C_GREY, C_BG, TR_DATUM);
-    text(fmtT(cur.etaS), 28, 126, 4, C_WHITE, C_BG);
-    text(fmtT(cur.elapsedS), 212, 126, 4, C_WHITE, C_BG, TR_DATUM);
+    tft.fillRect(28, 58, 184, 25, C_BG);
+    text("ETA", 28, 58, 1, C_GREY, C_BG);
+    text("ELAPSED", 212, 58, 1, C_GREY, C_BG, TR_DATUM);
+    text(fmtT(cur.etaS), 28, 67, 2, C_WHITE, C_BG);
+    text(fmtT(cur.elapsedS), 212, 67, 2, C_WHITE, C_BG, TR_DATUM);
   }
 
   // 溫度
   if (force || cur.nozzle != shown.nozzle || cur.bed != shown.bed) {
-    tft.fillRect(28, 156, 184, 18, C_BG);
-    drawTemp(true, "NOZ", C_ORANGE, cur.nozzle, 158);
-    drawTemp(false, "BED", C_BLUE, cur.bed, 158);
+    tft.fillRect(28, 160, 184, 16, C_BG);
+    drawTemp(true, "NOZ", C_ORANGE, cur.nozzle, 160);
+    drawTemp(false, "BED", C_BLUE, cur.bed, 160);
   }
 
   // 四個卡槽 + 材質，使用中的用白色粗框
   if (force || !slotsEqual(cur, shown)) {
-    tft.fillRect(28, 176, 184, 44, C_BG);
+    tft.fillRect(28, 177, 184, 44, C_BG);
     for (int i = 0; i < 4; i++) {
       int x = 28 + (i * 146) / 3;
       const int y = 178;
@@ -371,6 +376,53 @@ static void renderDash() {
   shown = cur;
   shownValid = true;
 }
+
+// ====================== 外圈流水特效 ======================
+// 列印中，一條「頭亮尾淡」的亮帶沿著已完成的進度條順時針流動
+#if FLOW_EFFECT
+static float flowHead = 0;
+static unsigned long nextFlow = 0;
+
+static uint16_t tint(uint16_t c, uint8_t a) {  // 往白色混合，a=0 原色 → 255 全白
+  int r = ((c >> 11) & 0x1F) << 3, g = ((c >> 5) & 0x3F) << 2, b = (c & 0x1F) << 3;
+  r += (255 - r) * a / 255;
+  g += (255 - g) * a / 255;
+  b += (255 - b) * a / 255;
+  return RGB565(r, g, b);
+}
+
+static void animateFlow() {
+  if (!shownValid || cur.state != "PRINTING") return;
+  unsigned long now = millis();
+  if (now < nextFlow) return;
+  nextFlow = now + FLOW_MS;
+
+  float len = shownLen;                 // 目前已畫出的進度長度
+  if (len < 14) return;
+  float L = FLOW_LEN < len ? FLOW_LEN : len;
+  float oldHead = flowHead;
+  float newHead = oldHead + FLOW_STEP;
+
+  // 1) 把剛離開的尾巴還原成進度條底色
+  float eFrom = oldHead - L; if (eFrom < 0) eFrom = 0;
+  float eTo = newHead - L;   if (eTo > len) eTo = len;
+  if (eTo > eFrom) drawRing(eFrom, eTo, cur.stateColor);
+
+  // 2) 整條亮帶已經滑出進度條尾端 → 回到起點重來
+  if (newHead - L > len) { flowHead = 0; return; }
+
+  // 3) 畫新的亮帶：尾巴淡、頭部亮
+  float a0 = newHead - L; if (a0 < 0) a0 = 0;
+  float a1 = newHead;     if (a1 > len) a1 = len;
+  int x, y;
+  for (float sp = a0; sp <= a1; sp += 2.0f) {
+    float t = (sp - (newHead - L)) / L;   // 0 尾 → 1 頭
+    ringPoint(sp, x, y);
+    tft.fillCircle(x, y, 8, tint(cur.stateColor, (uint8_t)(40 + 190 * t)));
+  }
+  flowHead = newHead;
+}
+#endif
 
 // ====================== Moonraker 輪詢 ======================
 static bool parseColor(const char *s, uint32_t &out) {
@@ -547,10 +599,10 @@ static String row(const String &k, const String &v) {
 void handleRoot() {
   web.setContentLength(CONTENT_LENGTH_UNKNOWN);
   web.send(200, "text/html; charset=utf-8", "");
-  web.sendContent_P(PAGE_HEAD); // 注意：chunked 模式下 sendContent("") 會直接結束回應，所以空字串不能送
-String hostVal = htmlEscape(printerHost);
-if (hostVal.length() > 0) web.sendContent(hostVal);
-  
+  web.sendContent_P(PAGE_HEAD);
+  // 注意：chunked 模式下 sendContent("") 會直接結束回應，所以空字串不能送
+  String hostVal = htmlEscape(printerHost);
+  if (hostVal.length() > 0) web.sendContent(hostVal);
   web.sendContent_P(PAGE_MID);
   String ago = lastOkMs ? String((millis() - lastOkMs) / 1000) + " 秒前" : String("尚未成功");
   web.sendContent(row("WiFi", WiFi.SSID()));
@@ -684,5 +736,8 @@ void loop() {
   } else if (!wifiUp && webStarted) {
     setScreen(SCR_WIFILOST);
   }
+#if FLOW_EFFECT
+  if (screen == SCR_DASH) animateFlow();
+#endif
   yield();
 }
