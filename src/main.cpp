@@ -17,6 +17,9 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
+#ifndef PWMRANGE
+#define PWMRANGE 1023
+#endif
 
 // ====================== 可調整 ======================
 #define PORTAL_AP_NAME     "K2-Monitor"     // 第一次設定用的 WiFi 熱點名稱
