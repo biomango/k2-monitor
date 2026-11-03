@@ -130,7 +130,7 @@ void saveConfig() {
 // 背光用 PWM 調亮度；BL_ON_LEVEL 為 LOW 的板子是「低電位亮」，所以佔空比要反過來
 void setBacklight(int pct) {
   brightPct = constrain(pct, 5, 100);
-  int v = brightPct * 1023 / 100;
+  int v = brightPct * PWMRANGE / 100;
   analogWrite(BL_PIN, BL_ON_LEVEL == LOW ? PWMRANGE - v : v);
 }
 
