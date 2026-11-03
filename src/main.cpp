@@ -21,9 +21,10 @@
 // ====================== 可調整 ======================
 #define PORTAL_AP_NAME     "K2-Monitor"     // 第一次設定用的 WiFi 熱點名稱
 #define MDNS_NAME          "k2-monitor"     // 之後可用 http://k2-monitor.local/ 開設定頁
-#define HOST_FILE          "/printer_host.txt"
+#define HOST_FILE          "/printer_host.txt"   // 舊版設定檔，只用來遷移
+#define CONFIG_FILE        "/config.json"
 #define DEFAULT_PORT       7125
-#define POLL_INTERVAL_MS   3000
+#define POLL_DEFAULT_SEC   3                // 資料更新週期預設值（秒），網頁可改 1~30
 #define HTTP_TIMEOUT_MS    4000
 #define BL_PIN             5                // 背光腳位
 #define BL_ON_LEVEL        LOW              // 螢幕全黑的話改成 HIGH
@@ -47,10 +48,18 @@
 #define C_EMPTY  RGB565(23, 29, 35)
 
 TFT_eSPI tft;
+TFT_eSprite spr = TFT_eSprite(&tft);  // 離屏畫布：每次畫一條 184x25 的橫帶，畫好再一次推上螢幕，避免「先清掉再重畫」造成的閃爍
+bool sprOk = false;
+bool useSpr = false;                  // 目前繪圖目標：true = sprite，false = 螢幕本身
+int ox = 0, oy = 0;                   // 繪圖目標左上角對應的螢幕座標
+int curStripY = 0;                    // 目前正在組合的橫帶起始 y（螢幕座標）
 ESP8266WebServer web(80);
 WiFiManager wm;
 
 String printerHost;            // 例如 "192.168.0.102:7125"
+int brightPct = 100;           // 螢幕背光亮度 5~100 (%)
+int bgLevel = 70;              // 背景數字亮度 0~255
+int pollSec = POLL_DEFAULT_SEC;  // 資料更新週期 1~30 秒
 bool webStarted = false;
 unsigned long nextPoll = 0;
 unsigned long lastOkMs = 0;
@@ -68,7 +77,6 @@ struct Data {
   String state = "CONNECTING";
   uint16_t stateColor = C_GREY;
   String filename = "";
-  int layerCur = -1, layerTotal = -1;
   float progress = 0;
   int elapsedS = -1, etaS = -1;
   int nozzle = -1, bed = -1;
@@ -81,20 +89,46 @@ bool shownValid = false;
 float shownLen = -1;
 
 // ====================== 設定檔 ======================
-void loadHost() {
-  if (!LittleFS.exists(HOST_FILE)) return;
-  File f = LittleFS.open(HOST_FILE, "r");
+void loadConfig() {
+  if (LittleFS.exists(CONFIG_FILE)) {
+    File f = LittleFS.open(CONFIG_FILE, "r");
+    if (f) {
+      JsonDocument d;
+      if (!deserializeJson(d, f)) {
+        printerHost = String((const char *)(d["host"] | ""));
+        brightPct = constrain((int)(d["bright"] | 100), 5, 100);
+        bgLevel = constrain((int)(d["bg"] | 70), 0, 200);
+        pollSec = constrain((int)(d["poll"] | POLL_DEFAULT_SEC), 1, 30);
+      }
+      f.close();
+    }
+  } else if (LittleFS.exists(HOST_FILE)) {  // 舊版只存了印表機位址
+    File f = LittleFS.open(HOST_FILE, "r");
+    if (f) {
+      printerHost = f.readStringUntil('\n');
+      printerHost.trim();
+      f.close();
+    }
+  }
+}
+
+void saveConfig() {
+  File f = LittleFS.open(CONFIG_FILE, "w");
   if (!f) return;
-  printerHost = f.readStringUntil('\n');
-  printerHost.trim();
+  JsonDocument d;
+  d["host"] = printerHost;
+  d["bright"] = brightPct;
+  d["bg"] = bgLevel;
+  d["poll"] = pollSec;
+  serializeJson(d, f);
   f.close();
 }
 
-void saveHost(const String &h) {
-  File f = LittleFS.open(HOST_FILE, "w");
-  if (!f) return;
-  f.println(h);
-  f.close();
+// 背光用 PWM 調亮度；BL_ON_LEVEL 為 LOW 的板子是「低電位亮」，所以佔空比要反過來
+void setBacklight(int pct) {
+  brightPct = constrain(pct, 5, 100);
+  int v = brightPct * PWMRANGE / 100;
+  analogWrite(BL_PIN, BL_ON_LEVEL == LOW ? PWMRANGE - v : v);
 }
 
 // 接受 "192.168.0.102"、"192.168.0.102:7125"、"http://192.168.0.102:7125/"，統一成 "ip:port"
@@ -207,11 +241,30 @@ static uint16_t textOn(uint32_t rgb) {
   return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? RGB565(0, 0, 0) : C_WHITE;
 }
 
-// 透明背景文字（只畫字，不填底色）：前景疊在背景大數字上用
-static void textT(const String &s, int x, int y, int font, uint16_t fg, uint8_t datum = TL_DATUM) {
-  tft.setTextDatum(datum);
-  tft.setTextColor(fg);
-  tft.drawString(s, x, y, font);
+// ---- 離屏繪圖包裝：呼叫時一律用「螢幕座標」，自動換算成目前繪圖目標（sprite 或螢幕）的座標 ----
+#define STRIP_X  28
+#define STRIP_W  184
+#define STRIP_H  25
+#define STRIP_Y0 22
+#define STRIP_N  8   // 8 條 x 25 列 = y 22~221
+
+// 直接對 sprite 或 tft 這個物件呼叫（不經過基底類別指標），確保用到的是各自的實作
+#define GO(call) do { if (useSpr) spr.call; else tft.call; } while (0)
+
+static inline void gRect(int x, int y, int w, int h, uint16_t c) { GO(fillRect(x - ox, y - oy, w, h, c)); }
+static inline void gTri(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {
+  GO(fillTriangle(x0 - ox, y0 - oy, x1 - ox, y1 - oy, x2 - ox, y2 - oy, c));
+}
+static inline void gCircle(int x, int y, int r, uint16_t c) { GO(fillCircle(x - ox, y - oy, r, c)); }
+static inline void gCircleO(int x, int y, int r, uint16_t c) { GO(drawCircle(x - ox, y - oy, r, c)); }
+static inline void gRRect(int x, int y, int w, int h, int r, uint16_t c) { GO(fillRoundRect(x - ox, y - oy, w, h, r, c)); }
+static inline void gRRectO(int x, int y, int w, int h, int r, uint16_t c) { GO(drawRoundRect(x - ox, y - oy, w, h, r, c)); }
+static inline void gLine(int x0, int y0, int x1, int y1, uint16_t c) { GO(drawLine(x0 - ox, y0 - oy, x1 - ox, y1 - oy, c)); }
+// 透明背景文字（只畫字，不填底色）：疊在背景大數字上用
+static void gText(const String &s, int x, int y, int font, uint16_t fg, uint8_t datum = TL_DATUM) {
+  GO(setTextDatum(datum));
+  GO(setTextColor(fg));
+  GO(drawString(s, x - ox, y - oy, font));
 }
 
 static uint16_t mix565(uint16_t a, uint16_t b, uint8_t t) {  // t=0 → a，t=255 → b
@@ -220,28 +273,49 @@ static uint16_t mix565(uint16_t a, uint16_t b, uint8_t t) {  // t=0 → a，t=25
   return RGB565(ar + (br - ar) * t / 255, ag + (bg - ag) * t / 255, ab + (bb - ab) * t / 255);
 }
 
-// ---- 背景大數字：TFT 內建字型 6 放大，實心、低對比（沒有外暈）----
-static int bgPct = 0;
-static uint16_t bgColor = 0;
+// ---- 背景大數字：兩位數固定（00~99）、七段顯示器造型、實心色塊，沒有外暈 ----
 
-static void drawBgNumber() {
-  String n = String(bgPct);
-  // 字型 6 一個數字 27x48；放大後上下各留約 28 像素餘裕，不會碰到外圈或被裁切：
-  // 1~2 位 ×3 = 81x144（2 位共 162x144）、3 位(100) ×2 = 162x96
-  uint8_t sz = n.length() <= 2 ? 3 : 2;
-  tft.setTextSize(sz);
-  tft.setTextColor(mix565(C_BG, bgColor, 36));  // 單一參數 = 透明背景，只畫字
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString(n, 120, 122, 6);
-  tft.setTextSize(1);
+static const uint8_t SEG7[10] = {  // bit0..6 = a,b,c,d,e,f,g
+  0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110,
+  0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111};
+
+static int bgNum = -1;  // 0~99；-1 = 不顯示（完成 / 閒置時）
+
+// 橫向六角形線段：兩端是尖的，中心線在 yc，粗 t
+static void segH(int x0, int x1, int yc, int t, uint16_t col) {
+  gRect(x0 + t / 2 - 1, yc - t / 2, (x1 - x0) - t + 2, t, col);
+  gTri(x0, yc, x0 + t / 2, yc - t / 2, x0 + t / 2, yc + t / 2, col);
+  gTri(x1, yc, x1 - t / 2, yc - t / 2, x1 - t / 2, yc + t / 2, col);
 }
 
-// 把某個區塊還原成「底色 + 背景大數字」（用 viewport 裁切，只畫這個矩形）
-static void bgRestore(int x, int y, int w, int h) {
-  tft.setViewport(x, y, w, h, false);
-  tft.fillRect(x, y, w, h, C_BG);
-  drawBgNumber();
-  tft.resetViewport();
+// 直向六角形線段：兩端是尖的，中心線在 xc，粗 t
+static void segV(int xc, int y0, int y1, int t, uint16_t col) {
+  gRect(xc - t / 2, y0 + t / 2 - 1, t, (y1 - y0) - t + 2, col);
+  gTri(xc, y0, xc - t / 2, y0 + t / 2, xc + t / 2, y0 + t / 2, col);
+  gTri(xc, y1, xc - t / 2, y1 - t / 2, xc + t / 2, y1 - t / 2, col);
+}
+
+static void drawSeg7Digit(int d, int x, int y, int w, int h, int t, uint16_t col) {
+  const int e = 3;                         // 線段之間的縫
+  int mid = y + h / 2;
+  int xl = x + t / 2, xr = x + w - t / 2;  // 左右兩條直線段的中心線
+  int yt = y + t / 2, yb = y + h - t / 2;  // 上下兩條橫線段的中心線
+  uint8_t m = SEG7[d];
+  if (m & 0x01) segH(xl + e, xr - e, yt, t, col);        // a 上
+  if (m & 0x02) segV(xr, yt + e, mid - e, t, col);       // b 右上
+  if (m & 0x04) segV(xr, mid + e, yb - e, t, col);       // c 右下
+  if (m & 0x08) segH(xl + e, xr - e, yb, t, col);        // d 下
+  if (m & 0x10) segV(xl, mid + e, yb - e, t, col);       // e 左下
+  if (m & 0x20) segV(xl, yt + e, mid - e, t, col);       // f 左上
+  if (m & 0x40) segH(xl + e, xr - e, mid, t, col);       // g 中
+}
+
+static void drawBgNumber() {
+  if (bgNum < 0) return;
+  uint16_t col = mix565(C_BG, C_WHITE, bgLevel);
+  // 條帶寬 184（x 28~212）：兩個數字各 88 寬、間隔 8，剛好塞滿；高 196（y 22~218）
+  drawSeg7Digit(bgNum / 10, 28, 22, 88, 196, 25, col);
+  drawSeg7Digit(bgNum % 10, 124, 22, 88, 196, 25, col);
 }
 
 // ====================== 各畫面 ======================
@@ -303,13 +377,100 @@ static bool slotsEqual(const Data &a, const Data &b) {
   return true;
 }
 
+static inline bool vis(int y0, int y1) { return y1 > curStripY && y0 < curStripY + STRIP_H; }
+
+// 把所有前景元素畫到目前的繪圖目標；不在這一條橫帶範圍內的元素直接跳過
+static void drawForeground() {
+  if (vis(22, 40)) {  // 狀態列：圓點 + 狀態 + 右上角小字顯示小電視自己的 IP
+    gCircle(34, 31, 5, cur.stateColor);
+    gText(cur.state, 44, 23, 2, C_WHITE);
+    gText(WiFi.localIP().toString(), 212, 27, 1, C_GREY, TR_DATUM);
+  }
+  if (vis(40, 56)) {  // 檔名（太長就截斷加 ..）
+    String fn = cur.filename;
+    bool cut = false;
+    while (fn.length() > 1 && tft.textWidth(fn + (cut ? ".." : ""), 2) > 184) {
+      fn.remove(fn.length() - 1);
+      cut = true;
+    }
+    gText(fn + (cut ? ".." : ""), 28, 40, 2, C_GREY);
+  }
+  if (vis(66, 112)) {  // ETA / ELAPSED：上面小標籤，下面數值
+    gText("ETA", 28, 66, 2, C_GREY);
+    gText("ELAPSED", 212, 66, 2, C_GREY, TR_DATUM);
+    gText(fmtT(cur.etaS), 28, 84, 4, C_WHITE);
+    gText(fmtT(cur.elapsedS), 212, 84, 4, C_WHITE, TR_DATUM);
+  }
+  if (vis(116, 162)) {  // NOZ / BED：上面小標籤，下面數值 + 度數圈
+    gText("NOZ", 28, 116, 2, C_ORANGE);
+    gText("BED", 212, 116, 2, C_BLUE, TR_DATUM);
+    String nv = cur.nozzle < 0 ? String("--") : String(cur.nozzle);
+    String bv = cur.bed < 0 ? String("--") : String(cur.bed);
+    gText(nv, 28, 134, 4, C_WHITE);
+    gText(bv, 204, 134, 4, C_WHITE, TR_DATUM);
+    if (cur.nozzle >= 0) gCircleO(28 + tft.textWidth(nv, 4) + 5, 139, 3, C_WHITE);
+    if (cur.bed >= 0) gCircleO(209, 139, 3, C_WHITE);
+  }
+  if (vis(176, 222)) {  // 四個卡槽 + 材質，使用中的用白色粗框
+    for (int i = 0; i < 4; i++) {
+      int x = 28 + (i * 146) / 3;
+      const int y = 178;
+      bool act = (i == cur.active);
+      String name = String("1") + (char)('A' + i);
+      if (cur.slots[i].has) {
+        uint16_t col = slotColor565(cur.slots[i].rgb);
+        gRRect(x, y, 38, 22, 5, col);
+        if (act) {
+          gRRectO(x, y, 38, 22, 5, C_WHITE);
+          gRRectO(x + 1, y + 1, 36, 20, 4, C_WHITE);
+        } else {
+          gRRectO(x, y, 38, 22, 5, C_BORDER);
+        }
+        gText(name, x + 19, y + 3, 2, textOn(cur.slots[i].rgb), TC_DATUM);
+        gText(String(cur.slots[i].mat), x + 19, y + 25, 2, act ? C_WHITE : C_GREY, TC_DATUM);
+      } else {
+        gRRect(x, y, 38, 22, 5, C_EMPTY);
+        gRRectO(x, y, 38, 22, 5, C_BORDER);
+        gLine(x + 13, y + 18, x + 25, y + 4, C_GREY);
+        gText("--", x + 19, y + 25, 2, C_GREY, TC_DATUM);
+      }
+    }
+  }
+}
+
+// 組合並推送一條橫帶（y0 起算 25 列）：背景 → 背景大數字 → 前景，全部在離屏畫好後一次推上螢幕，
+// 螢幕上的每個像素都是「舊畫面 → 新畫面」直接替換，中間不會出現被清空的狀態，所以不閃
+static void composeStrip(int y0) {
+  curStripY = y0;
+  if (sprOk) {
+    useSpr = true;
+    ox = STRIP_X;
+    oy = y0;
+    spr.fillSprite(C_BG);
+    drawBgNumber();
+    drawForeground();
+    spr.pushSprite(STRIP_X, y0);
+  } else {  // 記憶體不夠建 sprite 時的備援：直接畫在螢幕上，用 viewport 限制只畫這一條
+    useSpr = false;
+    ox = 0;
+    oy = 0;
+    tft.setViewport(STRIP_X, y0, STRIP_W, STRIP_H, false);
+    tft.fillRect(STRIP_X, y0, STRIP_W, STRIP_H, C_BG);
+    drawBgNumber();
+    drawForeground();
+    tft.resetViewport();
+  }
+}
+
 static void renderDash() {
   bool force = !shownValid;
   int pct = (int)(constrain(cur.progress, 0.0f, 1.0f) * 100 + 0.5f);
-  int shownPct = (int)(constrain(shown.progress, 0.0f, 1.0f) * 100 + 0.5f);
-  bool bgDirty = force || pct != shownPct || cur.stateColor != shown.stateColor;
+  if (pct > 99) pct = 99;  // 固定兩位數，100% 不處理
+  bool showNum = (cur.state == "PRINTING" || cur.state == "PAUSED");  // 完成 / 閒置 / 離線不顯示數字
+  int num = showNum ? pct : -1;
+  static int shownNum = -2;
 
-  // 外圈進度條
+  // 外圈進度條（直接畫在螢幕上，只補畫新增的那一小段）
   float len = constrain(cur.progress, 0.0f, 1.0f) * RING_TOTAL;
   if (force || cur.stateColor != shown.stateColor || len < shownLen - 1) {
     drawRing(0, RING_TOTAL, C_TRACK);
@@ -320,85 +481,27 @@ static void renderDash() {
     shownLen = len;
   }
 
-  // 背景大數字：百分比或狀態色改變時，整個中央重畫，前景再全部補畫
-  if (bgDirty) {
-    bgPct = pct;
-    bgColor = cur.stateColor;
-    bgRestore(28, 22, 184, 200);
-  }
-
-  // 狀態列：圓點 + 狀態 + 層數
-  if (bgDirty || cur.state != shown.state || cur.layerCur != shown.layerCur || cur.layerTotal != shown.layerTotal) {
-    if (!bgDirty) bgRestore(28, 22, 184, 18);
-    tft.fillCircle(34, 31, 5, cur.stateColor);
-    textT(cur.state, 44, 23, 2, C_WHITE);
-    if (cur.layerCur >= 0) {
-      String ly = "L" + String(cur.layerCur) + (cur.layerTotal > 0 ? "/" + String(cur.layerTotal) : "");
-      textT(ly, 212, 23, 2, C_GREY, TR_DATUM);
+  // 找出哪幾條橫帶需要重畫
+  uint8_t dirty = 0;
+  auto mark = [&](int y0, int y1) {
+    for (int k = 0; k < STRIP_N; k++) {
+      int s0 = STRIP_Y0 + k * STRIP_H, s1 = s0 + STRIP_H - 1;
+      if (y1 >= s0 && y0 <= s1) dirty |= (1 << k);
     }
+  };
+  if (force || num != shownNum) {
+    dirty = 0xFF;  // 背景數字變了：整個中央區域重畫（逐條推送，不閃）
+  } else {
+    if (cur.state != shown.state) mark(22, 40);
+    if (cur.filename != shown.filename) mark(40, 56);
+    if (cur.etaS != shown.etaS || cur.elapsedS != shown.elapsedS) mark(66, 112);
+    if (cur.nozzle != shown.nozzle || cur.bed != shown.bed) mark(116, 162);
+    if (!slotsEqual(cur, shown)) mark(176, 222);
   }
-
-  // 檔名（太長就截斷加 ..）
-  if (bgDirty || cur.filename != shown.filename) {
-    if (!bgDirty) bgRestore(28, 40, 184, 16);
-    String fn = cur.filename;
-    bool cut = false;
-    while (fn.length() > 1 && tft.textWidth(fn + (cut ? ".." : ""), 2) > 184) {
-      fn.remove(fn.length() - 1);
-      cut = true;
-    }
-    textT(fn + (cut ? ".." : ""), 28, 40, 2, C_GREY);
-  }
-
-  // ETA / ELAPSED：上面小標籤，下面數值
-  if (bgDirty || cur.etaS != shown.etaS || cur.elapsedS != shown.elapsedS) {
-    if (!bgDirty) bgRestore(28, 66, 184, 46);
-    textT("ETA", 28, 66, 2, C_GREY);
-    textT("ELAPSED", 212, 66, 2, C_GREY, TR_DATUM);
-    textT(fmtT(cur.etaS), 28, 84, 4, C_WHITE);
-    textT(fmtT(cur.elapsedS), 212, 84, 4, C_WHITE, TR_DATUM);
-  }
-
-  // NOZ / BED：上面小標籤，下面數值 + 度數圈
-  if (bgDirty || cur.nozzle != shown.nozzle || cur.bed != shown.bed) {
-    if (!bgDirty) bgRestore(28, 116, 184, 46);
-    textT("NOZ", 28, 116, 2, C_ORANGE);
-    textT("BED", 212, 116, 2, C_BLUE, TR_DATUM);
-    String nv = cur.nozzle < 0 ? String("--") : String(cur.nozzle);
-    String bv = cur.bed < 0 ? String("--") : String(cur.bed);
-    textT(nv, 28, 134, 4, C_WHITE);
-    textT(bv, 204, 134, 4, C_WHITE, TR_DATUM);
-    if (cur.nozzle >= 0) tft.drawCircle(28 + tft.textWidth(nv, 4) + 5, 139, 3, C_WHITE);
-    if (cur.bed >= 0) tft.drawCircle(209, 139, 3, C_WHITE);
-  }
-
-  // 四個卡槽 + 材質，使用中的用白色粗框
-  if (bgDirty || !slotsEqual(cur, shown)) {
-    if (!bgDirty) bgRestore(28, 177, 184, 44);
-    for (int i = 0; i < 4; i++) {
-      int x = 28 + (i * 146) / 3;
-      const int y = 178;
-      bool act = (i == cur.active);
-      String name = String("1") + (char)('A' + i);
-      if (cur.slots[i].has) {
-        uint16_t col = slotColor565(cur.slots[i].rgb);
-        tft.fillRoundRect(x, y, 38, 22, 5, col);
-        if (act) {
-          tft.drawRoundRect(x, y, 38, 22, 5, C_WHITE);
-          tft.drawRoundRect(x + 1, y + 1, 36, 20, 4, C_WHITE);
-        } else {
-          tft.drawRoundRect(x, y, 38, 22, 5, C_BORDER);
-        }
-        textT(name, x + 19, y + 3, 2, textOn(cur.slots[i].rgb), TC_DATUM);
-        textT(String(cur.slots[i].mat), x + 19, y + 25, 2, act ? C_WHITE : C_GREY, TC_DATUM);
-      } else {
-        tft.fillRoundRect(x, y, 38, 22, 5, C_EMPTY);
-        tft.drawRoundRect(x, y, 38, 22, 5, C_BORDER);
-        tft.drawLine(x + 13, y + 18, x + 25, y + 4, C_GREY);
-        textT("--", x + 19, y + 25, 2, C_GREY, TC_DATUM);
-      }
-    }
-  }
+  bgNum = num;
+  shownNum = num;
+  for (int k = 0; k < STRIP_N; k++)
+    if (dirty & (1 << k)) composeStrip(STRIP_Y0 + k * STRIP_H);
 
   shown = cur;
   shownValid = true;
@@ -466,7 +569,7 @@ static bool pollPrinter(Data &d) {
   if (printerHost.length() == 0) return false;
 
   String url = "http://" + printerHost +
-               "/printer/objects/query?print_stats=state,filename,print_duration,info"
+               "/printer/objects/query?print_stats=state,filename,print_duration"
                "&virtual_sdcard=progress&extruder=temperature&heater_bed=temperature"
                "&box=map,same_material";
 
@@ -483,8 +586,6 @@ static bool pollPrinter(Data &d) {
   fs["print_stats"]["state"] = true;
   fs["print_stats"]["filename"] = true;
   fs["print_stats"]["print_duration"] = true;
-  fs["print_stats"]["info"]["current_layer"] = true;
-  fs["print_stats"]["info"]["total_layer"] = true;
   fs["virtual_sdcard"]["progress"] = true;
   fs["extruder"]["temperature"] = true;
   fs["heater_bed"]["temperature"] = true;
@@ -505,8 +606,6 @@ static bool pollPrinter(Data &d) {
   float dur = st["print_stats"]["print_duration"] | 0.0f;
 
   d.filename = String((const char *)(st["print_stats"]["filename"] | ""));
-  d.layerCur = st["print_stats"]["info"]["current_layer"] | -1;
-  d.layerTotal = st["print_stats"]["info"]["total_layer"] | -1;
   d.nozzle = (int)((float)(st["extruder"]["temperature"] | -1.0f) + 0.5f);
   d.bed = (int)((float)(st["heater_bed"]["temperature"] | -1.0f) + 0.5f);
   if (d.nozzle < 0) d.nozzle = -1;
@@ -532,7 +631,6 @@ static bool pollPrinter(Data &d) {
     d.elapsedS = -1;
     d.etaS = -1;
   }
-  if (!running) { d.layerCur = -1; d.layerTotal = -1; }
   if (!running && d.filename.length() == 0) d.filename = "No active job";
 
   // 卡槽：顏色與材質來自 same_material，格式 [材質碼, 顏色, [槽位...], 材質名]
@@ -596,6 +694,8 @@ body{font-family:system-ui,sans-serif;background:#111;color:#eee;max-width:440px
 h1{font-size:20px}.c{background:#1d1d1d;border-radius:12px;padding:14px;margin:12px 0}
 label{display:block;color:#9aa;margin-bottom:6px;font-size:14px}
 input{width:100%;box-sizing:border-box;padding:10px;font-size:16px;border-radius:8px;border:1px solid #333;background:#000;color:#fff}
+input[type=range]{padding:0;border:0;background:none;height:32px;accent-color:#3ddc84}
+b{color:#fff}
 button{padding:10px 16px;font-size:15px;border:0;border-radius:8px;background:#3ddc84;color:#000;margin:10px 8px 0 0}
 button.g{background:#333;color:#eee}button.r{background:#a33;color:#fff}
 td{padding:3px 12px 3px 0;font-size:14px}td:first-child{color:#9aa}
@@ -610,13 +710,21 @@ static const char PAGE_MID[] PROGMEM = R"HTML(">
 <span id="r"></span></form></div>
 <div class="c"><table>)HTML";
 
-static const char PAGE_TAIL[] PROGMEM = R"HTML(</table></div>
+static const char PAGE_TAIL1[] PROGMEM = R"HTML(</table></div>)HTML";
+
+static const char PAGE_TAIL2[] PROGMEM = R"HTML(
 <div class="c"><form method="POST" action="/reset-wifi" onsubmit="return confirm('確定要清除 WiFi 設定並重新配網？')">
 <button class="r" type="submit">重置 WiFi</button></form></div>
 <script>
 function t(){var h=document.getElementById('host').value,r=document.getElementById('r');r.textContent='測試中…';
 fetch('/api/test?host='+encodeURIComponent(h)).then(function(x){return x.json()}).then(function(j){
 r.textContent=j.ok?('✔ 連線成功：'+j.name+'（'+j.state+'）'):('✘ '+j.msg)}).catch(function(){r.textContent='✘ 裝置沒回應'})}
+var T={};
+function bind(id,k,out){var e=document.getElementById(id);
+function s(save){document.getElementById(out).textContent=e.value;clearTimeout(T[id]);
+T[id]=setTimeout(function(){fetch('/api/set?'+k+'='+e.value+(save?'&save=1':''))},save?0:100)}
+e.addEventListener('input',function(){s(0)});e.addEventListener('change',function(){s(1)})}
+bind('br','bright','bv');bind('bg','bg','gv');bind('pl','poll','pv');
 </script></body></html>)HTML";
 
 static String row(const String &k, const String &v) {
@@ -636,7 +744,15 @@ void handleRoot() {
   web.sendContent(row("裝置 IP", WiFi.localIP().toString()));
   web.sendContent(row("印表機狀態", lastPrinterState.length() ? lastPrinterState : String("—")));
   web.sendContent(row("上次更新", ago));
-  web.sendContent_P(PAGE_TAIL);
+  web.sendContent_P(PAGE_TAIL1);
+  String sliders = String("<div class=\"c\"><label>螢幕亮度 <b id=\"bv\">") + brightPct + "</b> %</label>"
+                   "<input type=\"range\" id=\"br\" min=\"5\" max=\"100\" value=\"" + brightPct + "\">"
+                   "<label style=\"margin-top:14px\">背景數字亮度 <b id=\"gv\">" + bgLevel + "</b></label>"
+                   "<input type=\"range\" id=\"bg\" min=\"0\" max=\"200\" value=\"" + bgLevel + "\">"
+                   "<label style=\"margin-top:14px\">資料更新週期 <b id=\"pv\">" + pollSec + "</b> 秒</label>"
+                   "<input type=\"range\" id=\"pl\" min=\"1\" max=\"30\" value=\"" + pollSec + "\"></div>";
+  web.sendContent(sliders);
+  web.sendContent_P(PAGE_TAIL2);
   web.sendContent("");
 }
 
@@ -647,7 +763,7 @@ void handleSave() {
     return;
   }
   printerHost = host;
-  saveHost(host);
+  saveConfig();
   failCount = 0;
   nextPoll = 0;  // 立刻重新輪詢
   web.sendHeader("Location", "/");
@@ -685,6 +801,24 @@ void handleTest() {
   web.send(200, "application/json; charset=utf-8", body);
 }
 
+// 滑塊即時套用（不寫入）；放開滑塊時網頁會帶 save=1 才寫入快閃記憶體
+void handleSet() {
+  if (web.hasArg("bright")) setBacklight(web.arg("bright").toInt());
+  if (web.hasArg("bg")) {
+    bgLevel = constrain((int)web.arg("bg").toInt(), 0, 200);
+    if (screen == SCR_DASH) {
+      shownValid = false;  // 整個畫面重畫一次，立刻看到新的亮度
+      renderDash();
+    }
+  }
+  if (web.hasArg("poll")) {
+    pollSec = constrain((int)web.arg("poll").toInt(), 1, 30);
+    nextPoll = millis() + (unsigned long)pollSec * 1000UL;
+  }
+  if (web.hasArg("save")) saveConfig();
+  web.send(200, "text/plain", "ok");
+}
+
 void handleInfo() {
   JsonDocument d;
   d["printer"] = printerHost;
@@ -708,6 +842,7 @@ void startWeb() {
   web.on("/save", HTTP_POST, handleSave);
   web.on("/api/test", HTTP_GET, handleTest);
   web.on("/api/info", HTTP_GET, handleInfo);
+  web.on("/api/set", HTTP_GET, handleSet);
   web.on("/reset-wifi", HTTP_POST, handleResetWifi);
   web.begin();
   if (MDNS.begin(MDNS_NAME)) MDNS.addService("http", "tcp", 80);
@@ -719,13 +854,15 @@ void startWeb() {
 void setup() {
   Serial.begin(115200);
   pinMode(BL_PIN, OUTPUT);
-  digitalWrite(BL_PIN, BL_ON_LEVEL);
 
   LittleFS.begin();
-  loadHost();
+  loadConfig();
+  setBacklight(brightPct);
 
   tft.init();
   tft.setRotation(0);
+  sprOk = spr.createSprite(STRIP_W, STRIP_H) != nullptr;   // 最早配置，避免之後記憶體碎片化配不到
+  Serial.printf("sprite %s, free heap %u\n", sprOk ? "ok" : "FAILED", ESP.getFreeHeap());
   tft.fillScreen(C_BG);
   setScreen(SCR_BOOT);
 
@@ -754,7 +891,7 @@ void loop() {
     } else {
       if (screen != SCR_DASH) { setScreen(SCR_DASH); }
       if (millis() >= nextPoll) {
-        nextPoll = millis() + POLL_INTERVAL_MS;
+        nextPoll = millis() + (unsigned long)pollSec * 1000UL;
         doPoll();
       }
     }
