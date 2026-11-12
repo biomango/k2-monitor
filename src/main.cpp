@@ -468,6 +468,17 @@ static void text(const String &s, int x, int y, int font, uint16_t fg, uint16_t 
   tft.drawString(s, x, y, font);
 }
 
+// 卡片用的剩餘時間：H:MM（例如 0:30、3:12），寬度跟溫度數字差不多，才能跟溫度一樣用大字型；
+// 10 小時以上只顯示小時（例如 12h），不然 "12:30" 會超過卡片寬度，被迫改用小字型
+static String fmtEta(int s) {
+  if (s < 0) return "--";
+  char b[16];
+  int h = s / 3600, m = (s % 3600) / 60;
+  if (h >= 10) snprintf(b, sizeof(b), "%dh", h);
+  else snprintf(b, sizeof(b), "%d:%02d", h, m);
+  return String(b);
+}
+
 static String fmtT(int s) {
   if (s < 0) return "--";
   char b[16];
@@ -719,7 +730,7 @@ static void drawForeground() {
     else gText(cur.state == "IDLE" ? "NO JOB" : "NO IMG", 72, 108, 2, C_GREY, TC_DATUM);
   }
   // 右：剩餘時間、噴頭、熱床
-  miniCard(60, 0, C_GREY, cur.etaS < 0 ? String("--") : fmtT(cur.etaS), false);
+  miniCard(60, 0, C_GREY, fmtEta(cur.etaS), false);
   miniCard(97, 1, C_ORANGE, cur.nozzle < 0 ? String("--") : String(cur.nozzle), cur.nozzle >= 0);
   miniCard(134, 2, C_BLUE, cur.bed < 0 ? String("--") : String(cur.bed), cur.bed >= 0);
 
