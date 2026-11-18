@@ -24,3 +24,68 @@ jobs:
         run: pip install -U platformio
       - name: Build ESP32-S3 firmware
         run: pio run -d esp32s3
+
+      - name: Prepare named ESP32-S3 BIN files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import glob
+          import shutil
+          import subprocess
+          import sys
+
+          build = Path("esp32s3/.pio/build/k2-round")
+          dist = Path("esp32s3/dist")
+          dist.mkdir(parents=True, exist_ok=True)
+
+          # Keep the app-only image for OTA or an already initialized device.
+          shutil.copy2(build / "firmware.bin", dist / "esp32s3-amoled-175-app-only.bin")
+
+          # Merge bootloader, partition table, OTA data initializer and app
+          # into one image for first-time/full flashing.
+          bootloader = build / "bootloader.bin"
+          partitions = build / "partitions.bin"
+          boot_app0 = build / "boot_app0.bin"
+          firmware = build / "firmware.bin"
+          required = [bootloader, partitions, boot_app0, firmware]
+          missing = [str(p) for p in required if not p.is_file()]
+          if missing:
+              raise SystemExit("Missing ESP32-S3 flash image(s): " + ", ".join(missing))
+
+          esptool_matches = glob.glob(str(Path.home() / ".platformio/packages/tool-esptoolpy/esptool.py"))
+          if not esptool_matches:
+              raise SystemExit("PlatformIO esptool.py was not found")
+          merged = dist / "esp32s3-amoled-175-fullflash.bin"
+          cmd = [
+              sys.executable, esptool_matches[0], "--chip", "esp32s3", "merge-bin",
+              "-o", str(merged), "--flash-mode", "qio", "--flash-size", "16MB",
+              "--flash-freq", "80m",
+              "0x0", str(bootloader),
+              "0x8000", str(partitions),
+              "0xe000", str(boot_app0),
+              "0x10000", str(firmware),
+          ]
+          subprocess.run(cmd, check=True)
+
+          (dist / "README-燒錄說明.txt").write_text(
+              "目標硬體：Waveshare ESP32-S3-Touch-AMOLED-1.75 標準版（非 1.75C）\n"
+              "\n"
+              "首次安裝／完整燒錄：使用 esp32s3-amoled-175-fullflash.bin，"
+              "這是包含 bootloader、partition table、OTA 初始化資料與應用程式的合併映像，"
+              "從 Flash 位址 0x0000 開始燒錄。\n"
+              "\n"
+              "僅更新應用程式（裝置已經有相同分割表與 bootloader）："
+              "使用 esp32s3-amoled-175-app-only.bin，燒錄位址 0x10000。\n"
+              "\n"
+              "請勿將這兩個檔案用於 ESP8266。實際上板前仍需確認硬體顯示、觸控與相機功能。\n",
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Upload ESP32-S3 firmware BIN
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-S3-AMOLED-1.75-STD
+          path: esp32s3/dist/*
+          if-no-files-found: error
+          retention-days: 30
