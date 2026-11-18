@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
+#include <XPowersLib.h>
 #include <JPEGDEC.h>
 #include "esp_heap_caps.h"
 #include "TouchDrvCSTXXX.hpp"
@@ -35,6 +36,8 @@ static constexpr uint16_t GREEN = 0x07E0;
 static constexpr uint16_t AMBER = 0xFD20;
 static constexpr uint16_t RED = 0xF800;
 static constexpr uint16_t BLUE = 0x3DFF;
+
+static XPowersPMU panelPmu;
 
 Arduino_DataBus *displayBus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
@@ -481,6 +484,19 @@ static void handleTouch() {
 void setup() {
   Serial.begin(115200);
   Wire.begin(IIC_SDA, IIC_SCL);
+
+  // Original Waveshare 1.75 panel VDD is supplied by AXP2101 BLDO1.
+  // TamaPoke (same exact board) enables this 3.3V rail before CO5300 init.
+  Serial.println("[K2] Enabling AMOLED power via AXP2101 BLDO1...");
+  if (panelPmu.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    panelPmu.setBLDO1Voltage(3300);
+    panelPmu.enableBLDO1();
+    delay(100);
+    Serial.println("[K2] AXP2101 BLDO1 enabled at 3.3V");
+  } else {
+    Serial.println("[K2][ERROR] AXP2101 not detected; AMOLED power rail may be off");
+  }
+
   prefs.begin("k2monitor", false);
   printerHost = prefs.getString("printer", "");
   cameraUrl = prefs.getString("camera", "");
