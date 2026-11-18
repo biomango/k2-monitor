@@ -38,23 +38,33 @@ jobs:
           dist = Path("esp32s3/dist")
           dist.mkdir(parents=True, exist_ok=True)
 
-          # Keep the app-only image for OTA or an already initialized device.
-          shutil.copy2(build / "firmware.bin", dist / "esp32s3-amoled-175-app-only.bin")
-
-          # Merge bootloader, partition table, OTA data initializer and app
-          # into one image for first-time/full flashing.
+          firmware = build / "firmware.bin"
           bootloader = build / "bootloader.bin"
           partitions = build / "partitions.bin"
-          boot_app0 = build / "boot_app0.bin"
-          firmware = build / "firmware.bin"
-          required = [bootloader, partitions, boot_app0, firmware]
-          missing = [str(p) for p in required if not p.is_file()]
-          if missing:
-              raise SystemExit("Missing ESP32-S3 flash image(s): " + ", ".join(missing))
+          for path in (firmware, bootloader, partitions):
+              if not path.is_file():
+                  raise SystemExit(f"Required build output not found: {path}")
 
-          esptool_matches = glob.glob(str(Path.home() / ".platformio/packages/tool-esptoolpy/esptool.py"))
+          # App-only image is used only when bootloader and partition table
+          # on the target device already match this firmware.
+          shutil.copy2(firmware, dist / "esp32s3-amoled-175-app-only.bin")
+
+          # PlatformIO installs boot_app0.bin inside the Arduino framework
+          # package; it is not copied into the environment build directory.
+          boot_app0_matches = glob.glob(
+              str(Path.home() / ".platformio/packages/**/boot_app0.bin"),
+              recursive=True,
+          )
+          if not boot_app0_matches:
+              raise SystemExit("Could not locate boot_app0.bin in PlatformIO packages")
+          boot_app0 = Path(boot_app0_matches[0])
+
+          esptool_matches = glob.glob(
+              str(Path.home() / ".platformio/packages/tool-esptoolpy/esptool.py")
+          )
           if not esptool_matches:
               raise SystemExit("PlatformIO esptool.py was not found")
+
           merged = dist / "esp32s3-amoled-175-fullflash.bin"
           cmd = [
               sys.executable, esptool_matches[0], "--chip", "esp32s3", "merge-bin",
@@ -71,14 +81,14 @@ jobs:
               "目標硬體：Waveshare ESP32-S3-Touch-AMOLED-1.75 標準版（非 1.75C）\n"
               "\n"
               "首次安裝／完整燒錄：使用 esp32s3-amoled-175-fullflash.bin，"
-              "這是包含 bootloader、partition table、OTA 初始化資料與應用程式的合併映像，"
+              "包含 bootloader、partition table、OTA 初始化資料與應用程式，"
               "從 Flash 位址 0x0000 開始燒錄。\n"
               "\n"
-              "僅更新應用程式（裝置已經有相同分割表與 bootloader）："
+              "僅更新應用程式（裝置已經有相同 bootloader 與分割表）："
               "使用 esp32s3-amoled-175-app-only.bin，燒錄位址 0x10000。\n"
               "\n"
-              "請勿將這兩個檔案用於 ESP8266。實際上板前仍需確認硬體顯示、觸控與相機功能。\n",
-              encoding="utf-8"
+              "請勿將這些檔案用於 ESP8266。實際上板前仍需確認硬體顯示、觸控與相機功能。\n",
+              encoding="utf-8",
           )
           PY
 
