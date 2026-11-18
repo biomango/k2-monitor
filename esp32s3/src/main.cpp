@@ -219,9 +219,9 @@ static void drawDashboard() {
   gfx->fillRoundRect(34, 382, 190, 30, 10, PANEL);
   gfx->fillRoundRect(242, 382, 190, 30, 10, PANEL);
   drawUtf8At("噴頭 ", 48, 390, WHITE, 2);
-  drawUtf8At(printer.nozzle < 0 ? "--" : String(printer.nozzle) + "°", 104, 390, WHITE, 2);
+  drawUtf8At(printer.nozzle < 0 ? "--" : String(printer.nozzle) + "°", 110, 390, WHITE, 2);
   drawUtf8At("熱床 ", 256, 390, WHITE, 2);
-  drawUtf8At(printer.bed < 0 ? "--" : String(printer.bed) + "°", 312, 390, WHITE, 2);
+  drawUtf8At(printer.bed < 0 ? "--" : String(printer.bed) + "°", 318, 390, WHITE, 2);
   drawNav();
 }
 
