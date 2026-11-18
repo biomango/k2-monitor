@@ -427,7 +427,7 @@ static void handleTouch() {
   if (!points || millis() - lastTouch < 350) return;
   lastTouch = millis();
   const int x = touchX[0], y = touchY[0];
-  if (y >= 380 && y <= 460) {
+  if (y >= 414 && y <= 460) {
     if (x < 155) page = Page::Dashboard;
     else if (x < 310) page = Page::Camera;
     else page = Page::Settings;
