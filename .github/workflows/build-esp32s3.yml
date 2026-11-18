@@ -24,13 +24,14 @@ jobs:
         run: pip install -U platformio
       - name: Build ESP32-S3 firmware
         run: pio run -d esp32s3
+      - name: Install esptool for image packaging
+        run: python -m pip install "esptool==5.4.0"
 
       - name: Prepare named ESP32-S3 BIN files
         run: |
           python - <<'PY'
           from pathlib import Path
           import glob
-          import importlib.util
           import shutil
           import subprocess
           import sys
@@ -46,7 +47,7 @@ jobs:
               if not path.is_file():
                   raise SystemExit(f"Required build output not found: {path}")
 
-          # Keep an app-only image for updates to an already matching layout.
+          # App-only image is valid only for an already matching bootloader/layout.
           shutil.copy2(firmware, dist / "esp32s3-amoled-175-app-only.bin")
 
           platformio_home = Path.home() / ".platformio"
@@ -59,25 +60,9 @@ jobs:
               )
           boot_app0 = Path(boot_app0_matches[0])
 
-          # PlatformIO's esptool package layout differs between platform versions.
-          esptool_script_matches = glob.glob(
-              str(platformio_home / "**/esptool.py"), recursive=True
-          )
-          esptool_command = shutil.which("esptool") or shutil.which("esptool.py")
-          if esptool_script_matches:
-              esptool_prefix = [sys.executable, esptool_script_matches[0]]
-          elif esptool_command:
-              esptool_prefix = [esptool_command]
-          elif importlib.util.find_spec("esptool"):
-              esptool_prefix = [sys.executable, "-m", "esptool"]
-          else:
-              raise SystemExit(
-                  "Could not find esptool: checked PlatformIO packages, PATH, "
-                  "and the active Python environment"
-              )
-
           merged = dist / "esp32s3-amoled-175-fullflash.bin"
-          cmd = esptool_prefix + [
+          cmd = [
+              sys.executable, "-m", "esptool",
               "--chip", "esp32s3", "merge-bin",
               "-o", str(merged), "--flash-mode", "qio",
               "--flash-size", "16MB", "--flash-freq", "80m",
@@ -87,6 +72,8 @@ jobs:
               "0x10000", str(firmware),
           ]
           subprocess.run(cmd, check=True)
+          if not merged.is_file() or merged.stat().st_size == 0:
+              raise SystemExit("Full-flash image was not generated")
 
           (dist / "README-燒錄說明.txt").write_text(
               "目標硬體：Waveshare ESP32-S3-Touch-AMOLED-1.75 標準版（非 1.75C）\\n"
