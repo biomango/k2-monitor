@@ -1,0 +1,26 @@
+name: Build ESP32-S3 Round AMOLED
+
+on:
+  push:
+    branches: [main, "feature/esp32s3-round-amoled-camera"]
+    paths:
+      - "esp32s3/**"
+      - ".github/workflows/build-esp32s3.yml"
+  pull_request:
+    paths:
+      - "esp32s3/**"
+      - ".github/workflows/build-esp32s3.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO
+        run: pip install -U platformio
+      - name: Build ESP32-S3 firmware
+        run: pio run -d esp32s3
