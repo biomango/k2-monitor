@@ -122,6 +122,8 @@ static uint16_t stateColor() {
   return MUTED;
 }
 
+static String formatDuration(int seconds);
+
 static void drawDashboard() {
   page = Page::Dashboard;
   drawHeader("K2 PLUS");
@@ -363,7 +365,7 @@ static bool pollPrinter() {
   const String url = "http://" + hostForMoonraker() +
     "/printer/objects/query?print_stats=state,filename,print_duration"
     "&virtual_sdcard=progress&extruder=temperature&heater_bed=temperature"
-    "&print_stats=total_duration&box=map,same_material";
+    "&box=map,same_material";
   http.setTimeout(2500);
   if (!http.begin(client, url)) return false;
   const int code = http.GET();
