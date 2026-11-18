@@ -60,6 +60,8 @@ struct PrinterData {
   int bed = -1;
   int elapsed = -1;
   int eta = -1;
+  SlotData slots[4];
+  int activeSlot = -1;
   bool online = false;
 };
 PrinterData printer;
