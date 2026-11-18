@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - "esp32s3/**"
+      - "esp32s3-display-test/**"
       - ".github/workflows/build-esp32s3.yml"
   workflow_dispatch:
 
@@ -30,8 +31,7 @@ jobs:
       - name: Prepare standalone display test BIN
         run: |
           mkdir -p esp32s3-display-test/dist
-          cp esp32s3-display-test/.pio/build/waveshare-display-test/firmware.bin \\
-            esp32s3-display-test/dist/esp32s3-amoled-175-display-test.bin
+          cp esp32s3-display-test/.pio/build/waveshare-display-test/firmware.bin esp32s3-display-test/dist/esp32s3-amoled-175-display-test.bin
       - name: Install esptool for image packaging
         run: python -m pip install "esptool==5.4.0"
 
