@@ -50,6 +50,8 @@ Preferences prefs;
 enum class Page : uint8_t { Dashboard, Camera, Settings };
 Page page = Page::Dashboard;
 
+struct SlotData { bool has = false; uint32_t rgb = 0; String material; };
+
 struct PrinterData {
   String state = "連線中";
   String filename = "";
@@ -99,15 +101,15 @@ static void drawHeader(const char *title) {
 }
 
 static void drawNav() {
-  const int y = 394;
-  gfx->fillRoundRect(24, y, 418, 54, 22, PANEL);
+  const int y = 414;
+  gfx->fillRoundRect(24, y, 418, 42, 18, PANEL);
   gfx->setTextSize(2);
   gfx->setTextColor(page == Page::Dashboard ? BLUE : MUTED);
-  gfx->setCursor(58, y + 18); gfx->print("總覽");
+  gfx->setCursor(58, y + 13); gfx->print("總覽");
   gfx->setTextColor(page == Page::Camera ? BLUE : MUTED);
-  gfx->setCursor(190, y + 18); gfx->print("相機");
+  gfx->setCursor(190, y + 13); gfx->print("相機");
   gfx->setTextColor(page == Page::Settings ? BLUE : MUTED);
-  gfx->setCursor(328, y + 18); gfx->print("設定");
+  gfx->setCursor(328, y + 13); gfx->print("設定");
 }
 
 static uint16_t stateColor() {
@@ -287,6 +289,60 @@ static void renderPage() {
   else drawSettingsPage();
 }
 
+
+static bool parseColor(const char *value, uint32_t &rgb) {
+  if (!value) return false;
+  const size_t len = strlen(value);
+  if (len < 6) return false;
+  const char *hex = value + len - 6;
+  for (int i = 0; i < 6; ++i) if (!isxdigit((unsigned char)hex[i])) return false;
+  rgb = strtoul(hex, nullptr, 16);
+  return true;
+}
+
+static int estimateTotalSeconds(const String &filename) {
+  const int dot = filename.lastIndexOf('.');
+  const String base = dot > 0 ? filename.substring(0, dot) : filename;
+  const int underscore = base.lastIndexOf('_');
+  const String segment = underscore >= 0 ? base.substring(underscore + 1) : base;
+  long total = 0, number = 0;
+  bool haveNumber = false;
+  for (unsigned i = 0; i < segment.length(); ++i) {
+    const char c = segment[i];
+    if (c >= '0' && c <= '9') { number = number * 10 + c - '0'; haveNumber = true; }
+    else if (haveNumber && (c == 'd' || c == 'h' || c == 'm' || c == 's')) {
+      total += number * (c == 'd' ? 86400L : c == 'h' ? 3600L : c == 'm' ? 60L : 1L);
+      number = 0; haveNumber = false;
+    } else return 0;
+  }
+  if (haveNumber || total < 60 || total > 30L * 86400L) return 0;
+  return (int)total;
+}
+
+static int estimateRemaining(float elapsed, float progress, int estimateTotal) {
+  float byFilename = estimateTotal > 0 ? estimateTotal - elapsed : -1;
+  float byProgress = progress >= 0.05f ? elapsed * (1.0f - progress) / progress : -1;
+  if (estimateTotal > 0 && byFilename <= 0) return byProgress >= 0 ? (int)byProgress : -1;
+  if (byFilename >= 0 && byProgress >= 0) {
+    const float weight = progress > 1.0f ? 1.0f : progress;
+    return (int)((1.0f - weight) * byFilename + weight * byProgress);
+  }
+  if (byFilename >= 0) return (int)byFilename;
+  if (byProgress >= 0) return (int)byProgress;
+  return -1;
+}
+
+static String formatDuration(int seconds) {
+  if (seconds < 0) return "--";
+  const int days = seconds / 86400;
+  const int hours = (seconds % 86400) / 3600;
+  const int minutes = (seconds % 3600) / 60;
+  char text[24];
+  if (days > 0) snprintf(text, sizeof(text), "%dd %02d:%02d", days, hours, minutes);
+  else snprintf(text, sizeof(text), "%02d:%02d", hours, minutes);
+  return String(text);
+}
+
 static bool pollPrinter() {
   if (printerHost.isEmpty() || WiFi.status() != WL_CONNECTED) return false;
   WiFiClient client;
@@ -294,7 +350,7 @@ static bool pollPrinter() {
   const String url = "http://" + hostForMoonraker() +
     "/printer/objects/query?print_stats=state,filename,print_duration"
     "&virtual_sdcard=progress&extruder=temperature&heater_bed=temperature"
-    "&print_stats=total_duration";
+    "&print_stats=total_duration&box=map,same_material";
   http.setTimeout(2500);
   if (!http.begin(client, url)) return false;
   const int code = http.GET();
