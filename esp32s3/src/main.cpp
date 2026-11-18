@@ -12,6 +12,7 @@
 #include <JPEGDEC.h>
 #include "esp_heap_caps.h"
 #include "TouchDrvCSTXXX.hpp"
+#include "cjk_font.h"
 
 static constexpr int LCD_SDIO0 = 4;
 static constexpr int LCD_SDIO1 = 5;
@@ -89,14 +90,80 @@ static String hostForMoonraker() {
   return printerHost + ":7125";
 }
 
-static void drawCentered(const String &s, int y, uint8_t size, uint16_t color) {
-  gfx->setTextSize(size);
+static int cjkGlyphIndex(uint32_t codepoint) {
+  int low = 0;
+  int high = sizeof(CJK_CODEPOINTS) / sizeof(CJK_CODEPOINTS[0]) - 1;
+  while (low <= high) {
+    const int mid = (low + high) / 2;
+    const uint16_t value = pgm_read_word(&CJK_CODEPOINTS[mid]);
+    if (value == codepoint) return mid;
+    if (value < codepoint) low = mid + 1;
+    else high = mid - 1;
+  }
+  return -1;
+}
+
+static int drawUtf8At(const String &s, int x, int y, uint16_t color, uint8_t scale) {
+  gfx->setTextSize(scale);
   gfx->setTextColor(color);
-  int16_t x1, y1;
-  uint16_t w, h;
-  gfx->getTextBounds(s.c_str(), 0, y, &x1, &y1, &w, &h);
-  gfx->setCursor((LCD_WIDTH - (int)w) / 2, y);
-  gfx->print(s);
+  for (size_t i = 0; i < s.length();) {
+    const uint8_t b0 = (uint8_t)s[i];
+    uint32_t cp = b0;
+    size_t count = 1;
+    if ((b0 & 0xE0) == 0xC0 && i + 1 < s.length()) {
+      cp = ((uint32_t)(b0 & 0x1F) << 6) | ((uint8_t)s[i + 1] & 0x3F);
+      count = 2;
+    } else if ((b0 & 0xF0) == 0xE0 && i + 2 < s.length()) {
+      cp = ((uint32_t)(b0 & 0x0F) << 12) |
+           (((uint8_t)s[i + 1] & 0x3F) << 6) | ((uint8_t)s[i + 2] & 0x3F);
+      count = 3;
+    } else if ((b0 & 0xF8) == 0xF0 && i + 3 < s.length()) {
+      cp = ((uint32_t)(b0 & 0x07) << 18) |
+           (((uint8_t)s[i + 1] & 0x3F) << 12) |
+           (((uint8_t)s[i + 2] & 0x3F) << 6) | ((uint8_t)s[i + 3] & 0x3F);
+      count = 4;
+    }
+    i += count;
+
+    if (cp < 0x80) {
+      gfx->setCursor(x, y);
+      gfx->write((uint8_t)cp);
+      x += 6 * scale;
+      continue;
+    }
+
+    const int glyph = cjkGlyphIndex(cp);
+    if (glyph < 0) {
+      gfx->setCursor(x, y);
+      gfx->write('?');
+      x += 6 * scale;
+      continue;
+    }
+    const size_t offset = (size_t)glyph * 8;
+    for (int row = 0; row < 8; ++row) {
+      const uint8_t bits = pgm_read_byte(&CJK_BITMAPS[offset + row]);
+      for (int col = 0; col < 8; ++col) {
+        if (bits & (0x80 >> col)) {
+          gfx->fillRect(x + col * scale, y + row * scale, scale, scale, color);
+        }
+      }
+    }
+    x += 8 * scale;
+  }
+  return x;
+}
+
+static void drawCentered(const String &s, int y, uint8_t size, uint16_t color) {
+  const uint8_t scale = size >= 3 ? 3 : 2;
+  int width = 0;
+  for (size_t i = 0; i < s.length();) {
+    const uint8_t b = (uint8_t)s[i];
+    if (b < 0x80) { width += 6 * scale; ++i; }
+    else if ((b & 0xE0) == 0xC0) { width += 8 * scale; i += 2; }
+    else if ((b & 0xF0) == 0xE0) { width += 8 * scale; i += 3; }
+    else { width += 8 * scale; i += 4; }
+  }
+  drawUtf8At(s, (LCD_WIDTH - width) / 2, y, color, scale);
 }
 
 static void drawHeader(const char *title) {
@@ -108,13 +175,9 @@ static void drawHeader(const char *title) {
 static void drawNav() {
   const int y = 414;
   gfx->fillRoundRect(24, y, 418, 42, 18, PANEL);
-  gfx->setTextSize(2);
-  gfx->setTextColor(page == Page::Dashboard ? BLUE : MUTED);
-  gfx->setCursor(58, y + 13); gfx->print("總覽");
-  gfx->setTextColor(page == Page::Camera ? BLUE : MUTED);
-  gfx->setCursor(190, y + 13); gfx->print("相機");
-  gfx->setTextColor(page == Page::Settings ? BLUE : MUTED);
-  gfx->setCursor(328, y + 13); gfx->print("設定");
+  drawUtf8At("總覽", 58, y + 12, page == Page::Dashboard ? BLUE : MUTED, 2);
+  drawUtf8At("相機", 190, y + 12, page == Page::Camera ? BLUE : MUTED, 2);
+  drawUtf8At("設定", 328, y + 12, page == Page::Settings ? BLUE : MUTED, 2);
 }
 
 static uint16_t stateColor() {
@@ -155,9 +218,10 @@ static void drawDashboard() {
   }
   gfx->fillRoundRect(34, 382, 190, 30, 10, PANEL);
   gfx->fillRoundRect(242, 382, 190, 30, 10, PANEL);
-  gfx->setTextSize(1); gfx->setTextColor(WHITE);
-  gfx->setCursor(48, 392); gfx->print("噴頭 "); gfx->print(printer.nozzle < 0 ? "--" : String(printer.nozzle) + "°");
-  gfx->setCursor(256, 392); gfx->print("熱床 "); gfx->print(printer.bed < 0 ? "--" : String(printer.bed) + "°");
+  drawUtf8At("噴頭 ", 48, 390, WHITE, 2);
+  drawUtf8At(printer.nozzle < 0 ? "--" : String(printer.nozzle) + "°", 104, 390, WHITE, 2);
+  drawUtf8At("熱床 ", 256, 390, WHITE, 2);
+  drawUtf8At(printer.bed < 0 ? "--" : String(printer.bed) + "°", 312, 390, WHITE, 2);
   drawNav();
 }
 
