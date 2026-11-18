@@ -60,7 +60,7 @@ jobs:
           output = dist / "esp32s3-amoled-175-display-test-fullflash.bin"
           subprocess.run([
               sys.executable, "-m", "esptool", "--chip", "esp32s3", "merge-bin",
-              "-o", str(output), "--flash-mode", "qio",
+              "-o", str(output), "--flash-mode", "dio",
               "--flash-size", "16MB", "--flash-freq", "80m",
               "0x0", str(bootloader),
               "0x8000", str(partitions),
