@@ -26,8 +26,13 @@ jobs:
       - name: Build
         run: pio run
 
-      - name: Upload firmware.bin
+      - name: Name ESP8266 firmware BIN
+        run: cp .pio/build/nodemcuv2/firmware.bin esp8266-nodemcuv2-firmware.bin
+
+      - name: Upload ESP8266 firmware BIN
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: .pio/build/nodemcuv2/firmware.bin
+          name: ESP8266-NodeMCU-v2
+          path: esp8266-nodemcuv2-firmware.bin
+          if-no-files-found: error
+          retention-days: 30
