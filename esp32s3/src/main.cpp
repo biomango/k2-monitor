@@ -134,12 +134,23 @@ static void drawDashboard() {
   gfx->getTextBounds(pct.c_str(), 0, 0, &x1, &y1, &w, &h);
   gfx->setCursor((LCD_WIDTH - (int)w) / 2, 210);
   gfx->print(pct);
-  drawCentered(printer.filename.length() ? printer.filename : "尚無列印工作", 320, 1, MUTED);
-  gfx->fillRoundRect(34, 350, 190, 34, 12, PANEL);
-  gfx->fillRoundRect(242, 350, 190, 34, 12, PANEL);
-  gfx->setTextSize(2); gfx->setTextColor(WHITE);
-  gfx->setCursor(48, 360); gfx->printf("噴頭 %s", printer.nozzle < 0 ? "--" : (String(printer.nozzle) + "°").c_str());
-  gfx->setCursor(256, 360); gfx->printf("熱床 %s", printer.bed < 0 ? "--" : (String(printer.bed) + "°").c_str());
+  drawCentered(printer.filename.length() ? printer.filename : "尚無列印工作", 298, 1, MUTED);
+  drawCentered("剩餘 " + formatDuration(printer.eta) + "  已列印 " + formatDuration(printer.elapsed), 318, 1, MUTED);
+  for (int i = 0; i < 4; ++i) {
+    const int x = 88 + i * 96;
+    const uint16_t color = printer.slots[i].has
+      ? gfx->color565((printer.slots[i].rgb >> 16) & 0xFF, (printer.slots[i].rgb >> 8) & 0xFF, printer.slots[i].rgb & 0xFF)
+      : PANEL;
+    gfx->fillCircle(x, 348, 14, color);
+    gfx->drawCircle(x, 348, 16, printer.activeSlot == i ? WHITE : MUTED);
+    gfx->setTextSize(1); gfx->setTextColor(MUTED);
+    gfx->setCursor(x - 8, 369); gfx->print("1"); gfx->print((char)('A' + i));
+  }
+  gfx->fillRoundRect(34, 382, 190, 30, 10, PANEL);
+  gfx->fillRoundRect(242, 382, 190, 30, 10, PANEL);
+  gfx->setTextSize(1); gfx->setTextColor(WHITE);
+  gfx->setCursor(48, 392); gfx->print("噴頭 "); gfx->print(printer.nozzle < 0 ? "--" : String(printer.nozzle) + "°");
+  gfx->setCursor(256, 392); gfx->print("熱床 "); gfx->print(printer.bed < 0 ? "--" : String(printer.bed) + "°");
   drawNav();
 }
 
@@ -376,6 +387,34 @@ static bool pollPrinter() {
   printer.nozzle = (int)((float)(st["extruder"]["temperature"] | -1.0f) + 0.5f);
   printer.bed = (int)((float)(st["heater_bed"]["temperature"] | -1.0f) + 0.5f);
   printer.elapsed = (int)(float)(st["print_stats"]["print_duration"] | -1.0f);
+  printer.eta = (raw == "printing" || raw == "paused")
+      ? estimateRemaining((float)printer.elapsed, printer.progress, estimateTotalSeconds(printer.filename)) : -1;
+
+  for (int i = 0; i < 4; ++i) printer.slots[i] = SlotData();
+  JsonArray sameMaterial = st["box"]["same_material"].as<JsonArray>();
+  for (JsonVariant entryValue : sameMaterial) {
+    JsonArray entry = entryValue.as<JsonArray>();
+    const char *colorText = entry[1] | "";
+    const char *materialText = entry[3] | "";
+    uint32_t rgb = 0;
+    if (!parseColor(colorText, rgb)) continue;
+    for (JsonVariant slotValue : entry[2].as<JsonArray>()) {
+      const char *slotCode = slotValue | "";
+      if (strlen(slotCode) == 3 && slotCode[0] == 'T' && slotCode[1] == '1' && slotCode[2] >= 'A' && slotCode[2] <= 'D') {
+        const int index = slotCode[2] - 'A';
+        printer.slots[index].has = true;
+        printer.slots[index].rgb = rgb;
+        printer.slots[index].material = materialText;
+      }
+    }
+  }
+  printer.activeSlot = -1;
+  if (raw == "printing" || raw == "paused") {
+    const char *mapped = st["box"]["map"]["T1A"] | "";
+    if (strlen(mapped) == 3 && mapped[0] == 'T' && mapped[1] == '1' && mapped[2] >= 'A' && mapped[2] <= 'D') {
+      printer.activeSlot = mapped[2] - 'A';
+    }
+  }
   printer.online = true;
   return true;
 }
