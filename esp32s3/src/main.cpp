@@ -17,14 +17,14 @@ static constexpr int LCD_SDIO1 = 5;
 static constexpr int LCD_SDIO2 = 6;
 static constexpr int LCD_SDIO3 = 7;
 static constexpr int LCD_SCLK = 38;
-static constexpr int LCD_RESET = 1;
+static constexpr int LCD_RESET = 39;
 static constexpr int LCD_CS = 12;
 static constexpr int LCD_WIDTH = 466;
 static constexpr int LCD_HEIGHT = 466;
 static constexpr int IIC_SDA = 15;
 static constexpr int IIC_SCL = 14;
 static constexpr int TP_INT = 11;
-static constexpr int TP_RST = 2;
+static constexpr int TP_RST = 40;
 static constexpr uint8_t TOUCH_ADDR = 0x5A;
 
 static constexpr uint16_t BG = 0x0000;
