@@ -32,7 +32,7 @@ pio run -d esp32s3 -t upload
 - [x] 保留 K2 Plus Moonraker 7125 埠查詢方式。
 - [ ] 移植原版 CFS 四槽顏色／材質與作用槽顯示。
 - [ ] 移植原版列印縮圖與 ETA 計算。
-- [ ] 完成 go2rtc MJPEG 串流接收、JPEG 解碼與 466×466 畫面裁切。
+- [x] 加入 go2rtc MJPEG 串流接收與 JPEG 四分之一縮放解碼（尚待實機驗證更新率及相容性）。
 - [ ] 實機驗證觸控方向、顯示亮度、記憶體及攝影機更新率。
 
 ## K2 Plus 攝影機
@@ -49,7 +49,7 @@ http://<印表機IP>:4408/go2rtc/api/stream.mjpeg?src=k2plus_mjpeg
 http://<印表機IP>:4408/go2rtc/api/frame.jpeg?src=k2plus
 ```
 
-MJPEG 即時串流是目標方案；目前此移植初版先完成面板、觸控及列印狀態骨架，尚未宣稱相機影像已能顯示。相機串流需以獨立讀取任務處理，避免阻塞 Moonraker 三秒輪詢。
+目前程式已加入 MJPEG multipart 讀取及 JPEG 四分之一縮放解碼，畫面更新只在相機頁進行。K2 Plus Helper Script 的串流實際格式、相機影像方向、解碼速度與長時間穩定性仍需實機驗證；串流尚未經過 CI 或硬體驗證。
 
 ## 注意
 
