@@ -491,13 +491,42 @@ void setup() {
     cameraUrl = "http://" + ip + ":4408/go2rtc/api/stream.mjpeg?src=k2plus_mjpeg";
   }
 
-  gfx->begin();
+  Serial.println("[K2] Starting CO5300 display...");
+  if (!gfx->begin()) {
+    Serial.println("[K2][ERROR] gfx->begin() failed - check CO5300/QSPI pins and GFX library");
+    while (true) delay(1000);
+  }
+
   gfx->setBrightness(180);
+  gfx->fillScreen(BG);
+  gfx->setTextColor(WHITE);
+  gfx->setTextSize(2);
+  gfx->setCursor(70, 170);
+  gfx->println("K2 MONITOR");
+  gfx->setTextSize(1);
+  gfx->setCursor(70, 215);
+  gfx->println("DISPLAY OK - STARTING");
+  Serial.println("[K2] CO5300 display initialized");
+
   setupTouch();
 
+  // Keep a visible status on the AMOLED while Wi-FiManager waits for credentials.
+  gfx->fillRect(50, 250, 366, 50, BG);
+  gfx->setCursor(70, 265);
+  gfx->println("CONNECTING WIFI...");
   WiFiManager wm;
   wm.setConfigPortalBlocking(true);
-  wm.autoConnect("K2-Monitor-Setup");
+  wm.setConfigPortalTimeout(180);
+  const bool wifiConnected = wm.autoConnect("K2-Monitor-Setup");
+  if (!wifiConnected) {
+    Serial.println("[K2][WARN] Wi-Fi setup timed out or was cancelled");
+    gfx->fillRect(50, 250, 366, 50, BG);
+    gfx->setCursor(70, 265);
+    gfx->println("WIFI NOT CONNECTED");
+  } else {
+    Serial.print("[K2] Wi-Fi connected, IP=");
+    Serial.println(WiFi.localIP());
+  }
 
   web.on("/", HTTP_GET, handleRoot);
   web.on("/save", HTTP_POST, handleSave);
