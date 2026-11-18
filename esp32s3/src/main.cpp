@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
 #include <JPEGDEC.h>
+#include "esp_heap_caps.h"
 #include "TouchDrvCSTXXX.hpp"
 
 static constexpr int LCD_SDIO0 = 4;
@@ -68,6 +69,7 @@ JPEGDEC jpeg;
 uint8_t *cameraFrame = nullptr;
 size_t cameraFrameCapacity = 0;
 int cameraContentLength = 0;
+int cameraFramePos = 0;
 int cameraFrameState = 0;
 uint32_t lastCameraDataMs = 0;
 uint32_t nextPoll = 0;
@@ -181,9 +183,8 @@ static void renderCameraFrame() {
   if (!cameraFrame || cameraContentLength <= 0) return;
   if (jpeg.openRAM(cameraFrame, cameraContentLength, drawCameraJpeg)) {
     jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-    jpeg.setScale(2);
     gfx->fillRect(29, 105, 408, 228, BG);
-    jpeg.decode(0, 0, 0);
+    jpeg.decode(0, 0, JPEG_SCALE_QUARTER);
     jpeg.close();
     cameraMessage = "即時串流";
   } else {
@@ -228,7 +229,7 @@ static void cameraTick() {
     }
     if (line.isEmpty() && cameraContentLength > 0) {
       if ((size_t)cameraContentLength > cameraFrameCapacity) {
-        uint8_t *next = (uint8_t *)ps_realloc(cameraFrame, cameraContentLength);
+        uint8_t *next = (uint8_t *)heap_caps_realloc(cameraFrame, cameraContentLength, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!next) {
           stopCameraStream();
           cameraMessage = "記憶體不足，無法載入影像";
@@ -237,16 +238,26 @@ static void cameraTick() {
         cameraFrame = next;
         cameraFrameCapacity = cameraContentLength;
       }
+      cameraFramePos = 0;
       cameraFrameState = 2;
     }
     return;
   }
 
-  if (cameraFrameState == 2 && cameraClient.available() >= cameraContentLength) {
-    const int got = cameraClient.read(cameraFrame, cameraContentLength);
-    if (got == cameraContentLength) renderCameraFrame();
-    cameraContentLength = 0;
-    cameraFrameState = 1;
+  if (cameraFrameState == 2) {
+    const int available = cameraClient.available();
+    const int remaining = cameraContentLength - cameraFramePos;
+    if (available > 0 && remaining > 0) {
+      const int chunk = available < remaining ? available : remaining;
+      const int got = cameraClient.read(cameraFrame + cameraFramePos, chunk);
+      if (got > 0) cameraFramePos += got;
+    }
+    if (cameraFramePos >= cameraContentLength) {
+      renderCameraFrame();
+      cameraContentLength = 0;
+      cameraFramePos = 0;
+      cameraFrameState = 1;
+    }
   }
 }
 
