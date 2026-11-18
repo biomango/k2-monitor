@@ -1,0 +1,296 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Arduino_GFX_Library.h>
+#include "TouchDrvCSTXXX.hpp"
+
+static constexpr int LCD_SDIO0 = 4;
+static constexpr int LCD_SDIO1 = 5;
+static constexpr int LCD_SDIO2 = 6;
+static constexpr int LCD_SDIO3 = 7;
+static constexpr int LCD_SCLK = 38;
+static constexpr int LCD_RESET = 1;
+static constexpr int LCD_CS = 12;
+static constexpr int LCD_WIDTH = 466;
+static constexpr int LCD_HEIGHT = 466;
+static constexpr int IIC_SDA = 15;
+static constexpr int IIC_SCL = 14;
+static constexpr int TP_INT = 11;
+static constexpr int TP_RST = 2;
+static constexpr uint8_t TOUCH_ADDR = 0x5A;
+
+static constexpr uint16_t BG = 0x0000;
+static constexpr uint16_t PANEL = 0x18E3;
+static constexpr uint16_t WHITE = 0xFFFF;
+static constexpr uint16_t MUTED = 0x9CF3;
+static constexpr uint16_t GREEN = 0x07E0;
+static constexpr uint16_t AMBER = 0xFD20;
+static constexpr uint16_t RED = 0xF800;
+static constexpr uint16_t BLUE = 0x3DFF;
+
+Arduino_DataBus *displayBus = new Arduino_ESP32QSPI(
+    LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+Arduino_CO5300 *gfx = new Arduino_CO5300(
+    displayBus, LCD_RESET, 0, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
+
+TouchDrvCST92xx touch;
+int16_t touchX[2] = {};
+int16_t touchY[2] = {};
+WebServer web(80);
+Preferences prefs;
+
+enum class Page : uint8_t { Dashboard, Camera, Settings };
+Page page = Page::Dashboard;
+
+struct PrinterData {
+  String state = "連線中";
+  String filename = "";
+  float progress = 0;
+  int nozzle = -1;
+  int bed = -1;
+  int elapsed = -1;
+  int eta = -1;
+  bool online = false;
+};
+PrinterData printer;
+
+String printerHost;
+String cameraUrl;
+uint32_t nextPoll = 0;
+uint32_t lastTouch = 0;
+uint32_t lastCameraAttempt = 0;
+String cameraMessage = "攝影機串流尚未設定";
+
+static String hostForMoonraker() {
+  if (printerHost.indexOf(':') >= 0) return printerHost;
+  return printerHost + ":7125";
+}
+
+static void drawCentered(const String &s, int y, uint8_t size, uint16_t color) {
+  gfx->setTextSize(size);
+  gfx->setTextColor(color);
+  int16_t x1, y1;
+  uint16_t w, h;
+  gfx->getTextBounds(s.c_str(), 0, y, &x1, &y1, &w, &h);
+  gfx->setCursor((LCD_WIDTH - (int)w) / 2, y);
+  gfx->print(s);
+}
+
+static void drawHeader(const char *title) {
+  gfx->fillScreen(BG);
+  gfx->fillRoundRect(24, 22, 418, 58, 22, PANEL);
+  drawCentered(title, 40, 2, WHITE);
+}
+
+static void drawNav() {
+  const int y = 394;
+  gfx->fillRoundRect(24, y, 418, 54, 22, PANEL);
+  gfx->setTextSize(2);
+  gfx->setTextColor(page == Page::Dashboard ? BLUE : MUTED);
+  gfx->setCursor(58, y + 18); gfx->print("總覽");
+  gfx->setTextColor(page == Page::Camera ? BLUE : MUTED);
+  gfx->setCursor(190, y + 18); gfx->print("相機");
+  gfx->setTextColor(page == Page::Settings ? BLUE : MUTED);
+  gfx->setCursor(328, y + 18); gfx->print("設定");
+}
+
+static uint16_t stateColor() {
+  if (printer.state == "列印中") return GREEN;
+  if (printer.state == "暫停") return AMBER;
+  if (printer.state == "錯誤") return RED;
+  if (!printer.online) return RED;
+  return MUTED;
+}
+
+static void drawDashboard() {
+  page = Page::Dashboard;
+  drawHeader("K2 PLUS");
+  drawCentered(printer.state, 104, 3, stateColor());
+  gfx->drawCircle(233, 235, 104, PANEL);
+  gfx->drawCircle(233, 235, 92, PANEL);
+  gfx->drawArc(233, 235, 92, 92, 135, 405,
+               BLUE);
+  gfx->setTextSize(5);
+  gfx->setTextColor(WHITE);
+  String pct = String((int)(printer.progress * 100 + 0.5f)) + "%";
+  int16_t x1, y1; uint16_t w, h;
+  gfx->getTextBounds(pct.c_str(), 0, 0, &x1, &y1, &w, &h);
+  gfx->setCursor((LCD_WIDTH - (int)w) / 2, 210);
+  gfx->print(pct);
+  drawCentered(printer.filename.length() ? printer.filename : "尚無列印工作", 320, 1, MUTED);
+  gfx->fillRoundRect(34, 350, 190, 34, 12, PANEL);
+  gfx->fillRoundRect(242, 350, 190, 34, 12, PANEL);
+  gfx->setTextSize(2); gfx->setTextColor(WHITE);
+  gfx->setCursor(48, 360); gfx->printf("噴頭 %s", printer.nozzle < 0 ? "--" : (String(printer.nozzle) + "°").c_str());
+  gfx->setCursor(256, 360); gfx->printf("熱床 %s", printer.bed < 0 ? "--" : (String(printer.bed) + "°").c_str());
+  drawNav();
+}
+
+static void drawCameraPage() {
+  page = Page::Camera;
+  drawHeader("印表機相機");
+  gfx->drawRoundRect(28, 104, 410, 230, 18, MUTED);
+  drawCentered("即時影像", 130, 2, WHITE);
+  drawCentered(cameraMessage, 190, 1, AMBER);
+  drawCentered("需啟用 K2 Plus Camera Support", 235, 1, MUTED);
+  drawCentered("MJPEG / go2rtc 串流", 270, 1, MUTED);
+  drawNav();
+}
+
+static void drawSettingsPage() {
+  page = Page::Settings;
+  drawHeader("網路設定");
+  drawCentered("印表機：" + (printerHost.length() ? printerHost : "尚未設定"), 150, 1, WHITE);
+  drawCentered("裝置 IP：" + WiFi.localIP().toString(), 205, 1, MUTED);
+  drawCentered("設定頁面：http://" + WiFi.localIP().toString(), 255, 1, BLUE);
+  drawNav();
+}
+
+static void renderPage() {
+  if (page == Page::Dashboard) drawDashboard();
+  else if (page == Page::Camera) drawCameraPage();
+  else drawSettingsPage();
+}
+
+static bool pollPrinter() {
+  if (printerHost.isEmpty() || WiFi.status() != WL_CONNECTED) return false;
+  WiFiClient client;
+  HTTPClient http;
+  const String url = "http://" + hostForMoonraker() +
+    "/printer/objects/query?print_stats=state,filename,print_duration"
+    "&virtual_sdcard=progress&extruder=temperature&heater_bed=temperature"
+    "&print_stats=total_duration";
+  http.setTimeout(2500);
+  if (!http.begin(client, url)) return false;
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) { http.end(); return false; }
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) return false;
+  JsonObject st = doc["result"]["status"];
+  if (st.isNull()) return false;
+
+  const String raw = st["print_stats"]["state"] | "";
+  if (raw == "printing") printer.state = "列印中";
+  else if (raw == "paused") printer.state = "暫停";
+  else if (raw == "complete") printer.state = "已完成";
+  else if (raw == "error") printer.state = "錯誤";
+  else if (raw == "standby") printer.state = "待機";
+  else if (raw == "cancelled") printer.state = "已取消";
+  else printer.state = raw.length() ? raw : "未知";
+
+  printer.filename = String((const char *)(st["print_stats"]["filename"] | ""));
+  printer.progress = constrain((float)(st["virtual_sdcard"]["progress"] | 0.0f), 0.0f, 1.0f);
+  printer.nozzle = (int)((float)(st["extruder"]["temperature"] | -1.0f) + 0.5f);
+  printer.bed = (int)((float)(st["heater_bed"]["temperature"] | -1.0f) + 0.5f);
+  printer.elapsed = (int)(float)(st["print_stats"]["print_duration"] | -1.0f);
+  printer.online = true;
+  return true;
+}
+
+static void handleRoot() {
+  String html = "<meta charset='utf-8'><h2>K2 Monitor 設定</h2><form method='post' action='/save'>"
+                "印表機 IP（可填 IP 或 IP:7125）：<input name='host' value='" + printerHost +
+                "'><button>儲存</button></form><p>相機串流預設：<code>http://印表機IP:4408/go2rtc/api/stream.mjpeg?src=k2plus_mjpeg</code></p>";
+  web.send(200, "text/html; charset=utf-8", html);
+}
+
+static void handleSave() {
+  if (web.hasArg("host")) {
+    printerHost = web.arg("host");
+    printerHost.trim();
+    prefs.putString("printer", printerHost);
+  }
+  web.sendHeader("Location", "/");
+  web.send(303);
+}
+
+static void handleInfo() {
+  JsonDocument doc;
+  doc["printer"] = printerHost;
+  doc["state"] = printer.state;
+  doc["progress"] = printer.progress;
+  doc["nozzle"] = printer.nozzle;
+  doc["bed"] = printer.bed;
+  doc["online"] = printer.online;
+  String body;
+  serializeJson(doc, body);
+  web.send(200, "application/json", body);
+}
+
+static void onTouchInterrupt() {}
+
+static void setupTouch() {
+  touch.setPins(TP_RST, TP_INT);
+  if (!touch.begin(Wire, TOUCH_ADDR, IIC_SDA, IIC_SCL)) {
+    Serial.println("CST9217 touch init failed");
+    return;
+  }
+  touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
+  touch.setMirrorXY(true, true);
+}
+
+static void handleTouch() {
+  const uint8_t points = touch.getPoint(touchX, touchY, 2);
+  if (!points || millis() - lastTouch < 350) return;
+  lastTouch = millis();
+  const int x = touchX[0], y = touchY[0];
+  if (y >= 380 && y <= 460) {
+    if (x < 155) page = Page::Dashboard;
+    else if (x < 310) page = Page::Camera;
+    else page = Page::Settings;
+    renderPage();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(IIC_SDA, IIC_SCL);
+  prefs.begin("k2monitor", false);
+  printerHost = prefs.getString("printer", "");
+  cameraUrl = prefs.getString("camera", "");
+  if (cameraUrl.isEmpty() && !printerHost.isEmpty()) {
+    String ip = printerHost;
+    const int colon = ip.indexOf(':');
+    if (colon >= 0) ip = ip.substring(0, colon);
+    cameraUrl = "http://" + ip + ":4408/go2rtc/api/stream.mjpeg?src=k2plus_mjpeg";
+  }
+
+  gfx->begin();
+  gfx->setBrightness(180);
+  setupTouch();
+
+  WiFiManager wm;
+  wm.setConfigPortalBlocking(true);
+  wm.autoConnect("K2-Monitor-Setup");
+
+  web.on("/", HTTP_GET, handleRoot);
+  web.on("/save", HTTP_POST, handleSave);
+  web.on("/api/info", HTTP_GET, handleInfo);
+  web.begin();
+
+  pollPrinter();
+  renderPage();
+}
+
+void loop() {
+  web.handleClient();
+  handleTouch();
+  if (millis() >= nextPoll && WiFi.status() == WL_CONNECTED) {
+    nextPoll = millis() + 3000;
+    const bool ok = pollPrinter();
+    if (!ok) {
+      printer.online = false;
+      printer.state = "離線";
+    }
+    if (page == Page::Dashboard) drawDashboard();
+  }
+  delay(5);
+}
