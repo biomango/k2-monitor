@@ -24,6 +24,13 @@ jobs:
         run: pip install -U platformio
       - name: Build ESP32-S3 firmware
         run: pio run -d esp32s3
+      - name: Build standalone Waveshare display test
+        run: pio run -d esp32s3-display-test
+      - name: Prepare standalone display test BIN
+        run: |
+          mkdir -p esp32s3-display-test/dist
+          cp esp32s3-display-test/.pio/build/waveshare-display-test/firmware.bin \\
+            esp32s3-display-test/dist/esp32s3-amoled-175-display-test.bin
       - name: Install esptool for image packaging
         run: python -m pip install "esptool==5.4.0"
 
@@ -95,5 +102,13 @@ jobs:
         with:
           name: ESP32-S3-AMOLED-1.75-STD
           path: esp32s3/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload standalone Waveshare display test BIN
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-S3-AMOLED-1.75-DISPLAY-TEST
+          path: esp32s3-display-test/dist/esp32s3-amoled-175-display-test.bin
           if-no-files-found: error
           retention-days: 30
