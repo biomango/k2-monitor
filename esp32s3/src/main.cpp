@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
+#include <JPEGDEC.h>
 #include "TouchDrvCSTXXX.hpp"
 
 static constexpr int LCD_SDIO0 = 4;
@@ -62,6 +63,13 @@ PrinterData printer;
 
 String printerHost;
 String cameraUrl;
+WiFiClient cameraClient;
+JPEGDEC jpeg;
+uint8_t *cameraFrame = nullptr;
+size_t cameraFrameCapacity = 0;
+int cameraContentLength = 0;
+int cameraFrameState = 0;
+uint32_t lastCameraDataMs = 0;
 uint32_t nextPoll = 0;
 uint32_t lastTouch = 0;
 uint32_t lastCameraAttempt = 0;
@@ -114,8 +122,7 @@ static void drawDashboard() {
   drawCentered(printer.state, 104, 3, stateColor());
   gfx->drawCircle(233, 235, 104, PANEL);
   gfx->drawCircle(233, 235, 92, PANEL);
-  gfx->drawArc(233, 235, 92, 92, 135, 405,
-               BLUE);
+  gfx->drawArc(233, 235, 96, 88, 135, 405, BLUE);
   gfx->setTextSize(5);
   gfx->setTextColor(WHITE);
   String pct = String((int)(printer.progress * 100 + 0.5f)) + "%";
@@ -130,6 +137,117 @@ static void drawDashboard() {
   gfx->setCursor(48, 360); gfx->printf("噴頭 %s", printer.nozzle < 0 ? "--" : (String(printer.nozzle) + "°").c_str());
   gfx->setCursor(256, 360); gfx->printf("熱床 %s", printer.bed < 0 ? "--" : (String(printer.bed) + "°").c_str());
   drawNav();
+}
+
+
+static int drawCameraJpeg(JPEGDRAW *draw) {
+  const int targetW = 410;
+  const int targetH = 230;
+  const int left = 28 + (targetW - draw->iWidth) / 2;
+  const int top = 104 + (targetH - draw->iHeight) / 2;
+  gfx->draw16bitRGBBitmap(left + draw->x, top + draw->y,
+                          draw->pPixels, draw->iWidth, draw->iHeight);
+  return 1;
+}
+
+static void stopCameraStream() {
+  if (cameraClient.connected()) cameraClient.stop();
+  cameraFrameState = 0;
+  cameraContentLength = 0;
+}
+
+static bool startCameraStream() {
+  if (printerHost.isEmpty()) return false;
+  String ip = printerHost;
+  const int colon = ip.indexOf(':');
+  if (colon >= 0) ip = ip.substring(0, colon);
+  if (!cameraClient.connect(ip.c_str(), 4408)) {
+    cameraMessage = "無法連線：請安裝 Camera Support";
+    return false;
+  }
+  cameraClient.setTimeout(30);
+  cameraClient.print("GET /go2rtc/api/stream.mjpeg?src=k2plus_mjpeg HTTP/1.1\r\n");
+  cameraClient.print("Host: " + ip + ":4408\r\n");
+  cameraClient.print("Accept: multipart/x-mixed-replace\r\n");
+  cameraClient.print("Connection: keep-alive\r\n\r\n");
+  cameraFrameState = 0;
+  cameraContentLength = 0;
+  lastCameraDataMs = millis();
+  cameraMessage = "正在連接 K2 Plus 相機…";
+  return true;
+}
+
+static void renderCameraFrame() {
+  if (!cameraFrame || cameraContentLength <= 0) return;
+  if (jpeg.openRAM(cameraFrame, cameraContentLength, drawCameraJpeg)) {
+    jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+    jpeg.setScale(2);
+    gfx->fillRect(29, 105, 408, 228, BG);
+    jpeg.decode(0, 0, 0);
+    jpeg.close();
+    cameraMessage = "即時串流";
+  } else {
+    cameraMessage = "JPEG 解碼失敗";
+  }
+}
+
+static void cameraTick() {
+  if (page != Page::Camera || WiFi.status() != WL_CONNECTED) return;
+  if (!cameraClient.connected()) {
+    if (millis() - lastCameraAttempt > 3000) {
+      lastCameraAttempt = millis();
+      startCameraStream();
+    }
+    return;
+  }
+  if (millis() - lastCameraDataMs > 8000) {
+    stopCameraStream();
+    cameraMessage = "串流逾時，重新連線中…";
+    return;
+  }
+  if (!cameraClient.available()) return;
+
+  String line = cameraClient.readStringUntil('\n');
+  line.trim();
+  lastCameraDataMs = millis();
+
+  if (cameraFrameState == 0) {
+    if (line.startsWith("HTTP/") && !line.endsWith("200 OK")) {
+      stopCameraStream();
+      cameraMessage = "相機服務未啟用（HTTP 非 200）";
+      return;
+    }
+    if (line.isEmpty()) cameraFrameState = 1;
+    return;
+  }
+
+  if (cameraFrameState == 1) {
+    if (line.startsWith("Content-Length:") || line.startsWith("content-length:")) {
+      cameraContentLength = line.substring(line.indexOf(':') + 1).toInt();
+      return;
+    }
+    if (line.isEmpty() && cameraContentLength > 0) {
+      if ((size_t)cameraContentLength > cameraFrameCapacity) {
+        uint8_t *next = (uint8_t *)ps_realloc(cameraFrame, cameraContentLength);
+        if (!next) {
+          stopCameraStream();
+          cameraMessage = "記憶體不足，無法載入影像";
+          return;
+        }
+        cameraFrame = next;
+        cameraFrameCapacity = cameraContentLength;
+      }
+      cameraFrameState = 2;
+    }
+    return;
+  }
+
+  if (cameraFrameState == 2 && cameraClient.available() >= cameraContentLength) {
+    const int got = cameraClient.read(cameraFrame, cameraContentLength);
+    if (got == cameraContentLength) renderCameraFrame();
+    cameraContentLength = 0;
+    cameraFrameState = 1;
+  }
 }
 
 static void drawCameraPage() {
@@ -283,6 +401,7 @@ void setup() {
 void loop() {
   web.handleClient();
   handleTouch();
+  cameraTick();
   if (millis() >= nextPoll && WiFi.status() == WL_CONNECTED) {
     nextPoll = millis() + 3000;
     const bool ok = pollPrinter();
