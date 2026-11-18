@@ -5,6 +5,7 @@ on:
     branches: [main, "feature/esp32s3-round-amoled-camera"]
     paths:
       - "esp32s3/**"
+      - "esp32s3-display-test/**"
       - ".github/workflows/build-esp32s3.yml"
   pull_request:
     paths:
