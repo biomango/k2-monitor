@@ -154,7 +154,7 @@ static int drawUtf8At(const String &s, int x, int y, uint16_t color, uint8_t sca
 }
 
 static void drawCentered(const String &s, int y, uint8_t size, uint16_t color) {
-  const uint8_t scale = size >= 3 ? 3 : 2;
+  const uint8_t scale = size >= 4 ? 4 : (size >= 3 ? 3 : 2);
   int width = 0;
   for (size_t i = 0; i < s.length();) {
     const uint8_t b = (uint8_t)s[i];
@@ -579,33 +579,38 @@ void setup() {
 
   gfx->setBrightness(180);
   gfx->fillScreen(BG);
-  gfx->setTextColor(WHITE);
-  gfx->setTextSize(2);
-  gfx->setCursor(70, 170);
-  gfx->println("K2 MONITOR");
-  gfx->setTextSize(1);
-  gfx->setCursor(70, 215);
-  gfx->println("DISPLAY OK - STARTING");
+  // Large, centered startup title sized for the 466x466 round AMOLED.
+  drawCentered("K2 MONITOR", 142, 4, WHITE);
+  gfx->drawRoundRect(82, 205, 302, 2, 1, BLUE);
+  drawCentered("3D PRINTER MONITOR", 220, 2, MUTED);
+  drawCentered("INITIALIZING...", 265, 2, BLUE);
   Serial.println("[K2] CO5300 display initialized");
 
   setupTouch();
 
-  // Keep a visible status on the AMOLED while Wi-FiManager waits for credentials.
-  gfx->fillRect(50, 250, 366, 50, BG);
-  gfx->setCursor(70, 265);
-  gfx->println("CONNECTING WIFI...");
+  // Show connection progress while WiFiManager waits for credentials.
+  drawCentered("CONNECTING WI-FI...", 310, 2, AMBER);
   WiFiManager wm;
   wm.setConfigPortalBlocking(true);
   wm.setConfigPortalTimeout(180);
   const bool wifiConnected = wm.autoConnect("K2-Monitor-Setup");
   if (!wifiConnected) {
     Serial.println("[K2][WARN] Wi-Fi setup timed out or was cancelled");
-    gfx->fillRect(50, 250, 366, 50, BG);
-    gfx->setCursor(70, 265);
-    gfx->println("WIFI NOT CONNECTED");
+    drawCentered("WI-FI NOT CONNECTED", 310, 2, RED);
+    drawCentered("OPEN K2-Monitor-Setup", 342, 1, MUTED);
   } else {
+    const String ssid = WiFi.SSID();
+    Serial.print("[K2] Wi-Fi connected, SSID=");
+    Serial.println(ssid);
     Serial.print("[K2] Wi-Fi connected, IP=");
     Serial.println(WiFi.localIP());
+
+    // Briefly show the actual connected network name before opening the dashboard.
+    gfx->fillRect(35, 295, 396, 100, BG);
+    drawCentered("WI-FI CONNECTED", 300, 2, GREEN);
+    drawCentered("SSID: " + ssid, 335, 2, WHITE);
+    drawCentered(WiFi.localIP().toString(), 370, 2, MUTED);
+    delay(1800);
   }
 
   web.on("/", HTTP_GET, handleRoot);
