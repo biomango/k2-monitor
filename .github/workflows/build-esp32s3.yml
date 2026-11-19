@@ -1,0 +1,97 @@
+name: Build ESP32-S3 Round AMOLED
+
+on:
+  push:
+    branches: [main, "feature/esp32s3-round-amoled-camera"]
+    paths:
+      - "esp32s3/**"
+      - ".github/workflows/build-esp32s3.yml"
+  pull_request:
+    paths:
+      - "esp32s3/**"
+      - ".github/workflows/build-esp32s3.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO
+        run: pip install -U platformio
+      - name: Build ESP32-S3 firmware
+        run: pio run -d esp32s3
+      - name: Install esptool for image packaging
+        run: python -m pip install "esptool==5.4.0"
+      - name: Prepare named ESP32-S3 BIN files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import glob
+          import shutil
+          import subprocess
+          import sys
+
+          build = Path("esp32s3/.pio/build/k2-round")
+          dist = Path("esp32s3/dist")
+          dist.mkdir(parents=True, exist_ok=True)
+
+          firmware = build / "firmware.bin"
+          bootloader = build / "bootloader.bin"
+          partitions = build / "partitions.bin"
+          for path in (firmware, bootloader, partitions):
+              if not path.is_file():
+                  raise SystemExit(f"Required build output not found: {path}")
+
+          # App-only image is valid only for an already matching bootloader/layout.
+          shutil.copy2(firmware, dist / "esp32s3-amoled-175-app-only.bin")
+
+          platformio_home = Path.home() / ".platformio"
+          boot_app0_matches = glob.glob(
+              str(platformio_home / "**/boot_app0.bin"), recursive=True
+          )
+          if not boot_app0_matches:
+              raise SystemExit(
+                  f"Could not locate boot_app0.bin under {platformio_home}"
+              )
+          boot_app0 = Path(boot_app0_matches[0])
+
+          merged = dist / "esp32s3-amoled-175-fullflash.bin"
+          cmd = [
+              sys.executable, "-m", "esptool",
+              "--chip", "esp32s3", "merge-bin",
+              "-o", str(merged), "--flash-mode", "dio",
+              "--flash-size", "16MB", "--flash-freq", "80m",
+              "0x0", str(bootloader),
+              "0x8000", str(partitions),
+              "0xe000", str(boot_app0),
+              "0x10000", str(firmware),
+          ]
+          subprocess.run(cmd, check=True)
+          if not merged.is_file() or merged.stat().st_size == 0:
+              raise SystemExit("Full-flash image was not generated")
+
+          (dist / "README-燒錄說明.txt").write_text(
+              "目標硬體：Waveshare ESP32-S3-Touch-AMOLED-1.75 標準版（非 1.75C）\\n"
+              "\\n"
+              "首次安裝／完整燒錄：使用 esp32s3-amoled-175-fullflash.bin，"
+              "包含 bootloader、partition table、OTA 初始化資料與應用程式，"
+              "從 Flash 位址 0x0000 開始燒錄。\\n"
+              "\\n"
+              "僅更新應用程式（裝置已經有相同 bootloader 與分割表）："
+              "使用 esp32s3-amoled-175-app-only.bin，燒錄位址 0x10000。\\n"
+              "\\n"
+              "請勿將這些檔案用於 ESP8266。實際上板前仍需確認硬體顯示、觸控與相機功能。\\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload ESP32-S3 firmware BIN
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-S3-AMOLED-1.75-STD
+          path: esp32s3/dist/*
+          if-no-files-found: error
+          retention-days: 30
