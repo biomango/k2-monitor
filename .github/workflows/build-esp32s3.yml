@@ -5,12 +5,10 @@ on:
     branches: [main, "feature/esp32s3-round-amoled-camera"]
     paths:
       - "esp32s3/**"
-      - "esp32s3-display-test/**"
       - ".github/workflows/build-esp32s3.yml"
   pull_request:
     paths:
       - "esp32s3/**"
-      - "esp32s3-display-test/**"
       - ".github/workflows/build-esp32s3.yml"
   workflow_dispatch:
 
@@ -26,60 +24,8 @@ jobs:
         run: pip install -U platformio
       - name: Build ESP32-S3 firmware
         run: pio run -d esp32s3
-      - name: Build standalone Waveshare display test
-        run: pio run -d esp32s3-display-test
-      - name: Prepare standalone display test BIN
-        run: |
-          mkdir -p esp32s3-display-test/dist
-          cp esp32s3-display-test/.pio/build/waveshare-display-test/firmware.bin esp32s3-display-test/dist/esp32s3-amoled-175-display-test.bin
       - name: Install esptool for image packaging
         run: python -m pip install "esptool==5.4.0"
-
-      - name: Package standalone display test full-flash image
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import glob
-          import subprocess
-          import sys
-
-          build = Path("esp32s3-display-test/.pio/build/waveshare-display-test")
-          dist = Path("esp32s3-display-test/dist")
-          bootloader = build / "bootloader.bin"
-          partitions = build / "partitions.bin"
-          firmware = build / "firmware.bin"
-          for path in (bootloader, partitions, firmware):
-              if not path.is_file():
-                  raise SystemExit(f"Required display-test output missing: {path}")
-
-          matches = glob.glob(str(Path.home() / ".platformio/**/boot_app0.bin"), recursive=True)
-          if not matches:
-              raise SystemExit("Could not locate boot_app0.bin")
-          boot_app0 = Path(matches[0])
-
-          output = dist / "esp32s3-amoled-175-display-test-fullflash.bin"
-          subprocess.run([
-              sys.executable, "-m", "esptool", "--chip", "esp32s3", "merge-bin",
-              "-o", str(output), "--flash-mode", "dio",
-              "--flash-size", "16MB", "--flash-freq", "80m",
-              "0x0", str(bootloader),
-              "0x8000", str(partitions),
-              "0xe000", str(boot_app0),
-              "0x10000", str(firmware),
-          ], check=True)
-          if not output.is_file() or output.stat().st_size == 0:
-              raise SystemExit("Display-test full-flash image was not generated")
-
-          (dist / "README-顯示測試燒錄說明.txt").write_text(
-              "用途：Waveshare ESP32-S3-Touch-AMOLED-1.75 標準版官方 CO5300 顯示測試。\\n"
-              "請使用本資料夾內的 esp32s3-amoled-175-display-test-fullflash.bin，"
-              "在燒錄工具中選擇位址 0x0000。\\n"
-              "此檔案包含本測試專用 bootloader、partition table、boot_app0 與測試程式。\\n"
-              "不要與 K2 Monitor 的 fullflash BIN 混用。\\n",
-              encoding="utf-8",
-          )
-          PY
-
       - name: Prepare named ESP32-S3 BIN files
         run: |
           python - <<'PY'
@@ -142,19 +88,10 @@ jobs:
               encoding="utf-8",
           )
           PY
-
       - name: Upload ESP32-S3 firmware BIN
         uses: actions/upload-artifact@v4
         with:
           name: ESP32-S3-AMOLED-1.75-STD
           path: esp32s3/dist/*
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload standalone Waveshare display test BIN
-        uses: actions/upload-artifact@v4
-        with:
-          name: ESP32-S3-AMOLED-1.75-DISPLAY-TEST
-          path: esp32s3-display-test/dist/*
           if-no-files-found: error
           retention-days: 30
